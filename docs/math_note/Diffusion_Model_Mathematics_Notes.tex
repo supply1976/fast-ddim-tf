@@ -1,0 +1,150 @@
+\documentclass{article}
+
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{url}
+\usepackage[a4paper, margin=1in]{geometry}
+
+\title{Diffusion Model Mathematics Notes}
+\author{Rich Wu}
+\date{\today}
+
+\begin{document}
+
+\maketitle
+
+\section{Diffusion Model Derivation}
+\subsection{Master Equations}
+De-nosing Diffusion Probabilistic Model (DDPM) is an application of stochastic Markov process, 
+derived from the following continuous time VP-SDE (Variance-Preserving Stochastic Differential Equation):
+\begin{equation}
+  d\textbf{X}(t)=-\frac{\beta(t)}{2} \textbf{X}(t)dt+\sqrt{\beta(t)}d\textbf{W}(t)
+\end{equation}
+
+$\textbf{X}(t)$ is the stochastic random variable (n-dim, in general), 
+by definition $d\textbf{X}(t)\equiv \textbf{X}(t+dt)-\textbf{X}(t)$.
+
+$\textbf{W}(t)$ is the standard Wiener process, 
+by definition $d\textbf{W}(t)\equiv \textbf{W}(t+dt)-\textbf{W}(t)=\sqrt{dt}\epsilon$, 
+where $\epsilon$ is the Gaussian random number sampled from normal distribution with mean=0 and variance=1.
+
+$\beta(t)\geq 0$, for $t \geq 0$, is the variance scheduler function.
+
+\paragraph{}
+This SDE is known as the time-dependent \textbf{Ornstein-Uhlenbeck} process in physics, 
+where the 1st-term in the right-hand-side of SDE is the drift term, and 2nd-term is the diffusion term.
+Physically it was to describe the particle velocity distribution under a drift force and a fluctuation (noise) force.
+\paragraph{}
+The solution of $\textbf{X}(t)$, or equivalently the distribution function $q(\textbf{X}(t))$,
+can be found by solving the corresponding 
+\textbf{Fokker-Planck equation} (aka \textbf{Kolmogorov forward equation}),
+which is the equation to describe the time evolution of conditional probability $q(x_t|x_s), t > s\geq 0$:
+\begin{equation}
+  \frac{\partial}{\partial t}q(x_t|x_s)=\frac{\beta(t)}{2} \left( \frac{\partial}{\partial x_t} (x_tq(x_t|x_s))
+  + \frac{\partial^2 q(x_t|x_s)}{\partial x_t^2} \right) ; t > s \geq 0
+\end{equation}
+Here we use the short notation for conditional probability density function:
+\begin{equation}
+  q(\textbf{X}(t)=x; t=t | \textbf{X}(s)=y; t=s) \equiv q(x;t|y;s) \equiv q(x_t|x_s)
+\end{equation}
+note that $\textbf{X}(t)$ is the stochastic random variable, 
+and $x, y$ are the sampled results at time $t, s$, for $t>s$.
+
+\subsection{Analytic Solution}
+The solution can be found by changing the variables:
+\begin{eqnarray}
+  B(t) &=& \int_0^t \beta(\tau)d\tau \\
+  \alpha_t \equiv \alpha(t) &=& \exp(-B(t)) \\
+  y_t &=& x_t \exp(B(t)/2)
+\end{eqnarray}
+The analytic solution is:
+\begin{equation}
+  q(x_t|x_s)=\exp \left( -\frac{(x_t-\sqrt{\alpha_t / \alpha_s}x_s)^2}{2(1-\alpha_t / \alpha_s)} \right)
+\end{equation}
+This is the Gaussian distribution, here we drop the normalization constant.
+
+By definition, $\alpha(t=0)=1$, so:
+\begin{equation}
+  q(x_t|x_0)=\exp \left( -\frac{(x_t-\sqrt{\alpha_t}x_0)^2}{2(1-\alpha_t)} \right)
+\end{equation}
+
+\subsubsection{forward sampling}
+For the forward sampling (noising process) at arbitrary time $t > 0$:
+\begin{equation}
+  x_t = \sqrt{\alpha_t}x_0 + \sqrt{1-\alpha_t} \epsilon_t
+\end{equation}
+where $\epsilon_t$ is the Gaussian noise.
+For a given initial data $x_0$ and a pre-defined signal decay function $\alpha(t)$, 
+one can compute "noised data" at arbitrary time $t$ using forward sampling formula.
+
+\subsubsection{signal decay function $\alpha_t$}
+The signal decay function $\alpha_t$ (called signal power in some other literatures)
+controls how the initial data (input image) lost its signature with gradually increasing noise.
+
+Two common types of $\alpha_t$ are:
+
+\textbf{linear scheduler}(original DDPM paper)
+\begin{eqnarray}
+  \beta(t) &=& \frac{1}{T}\left(\beta_0+ (\beta_1-\beta_0)\frac{t}{T} \right)  ; 0\leq t \leq T  \\
+  \alpha_t &=& \exp \left( -\int_0^t \beta(\tau)d\tau \right)
+\end{eqnarray}
+
+\textbf{cosine scheduler}(proposed in iDDPM paper):
+\begin{equation}
+  \alpha_t = \cos^2 \left( \frac{\pi}{2}\frac{t}{T} \right)  ; 0\leq t \leq T
+\end{equation}
+
+\begin{figure}[h]
+  \centering
+  \caption{signal decay function $\alpha_t$}
+  \fbox{\includegraphics[width=5cm]{example-image}}
+  \label{fig1}
+\end{figure}
+
+\subsubsection{reverse sampling}
+Ideally if we know the reverse conditional probability $q(x_s|x_t) (s<t)$, 
+we are able to apply the reverse sampling in the reverse diffusion process, 
+and back to original initial data $x_0$.
+However, the conditional probability $q(x_s|x_t)$ is unknown unless the marginal probability $q(x_0)$ 
+of the initial data distribution is given. 
+Unfortunately, $q(x_0)$ is usually unknown and is what we want to model. 
+
+The key step of DDPM is to use $q(x_s|x_t, x_0)$ to approximate the $q(x_s|x_t)$, 
+where $q(x_s|x_t, x_0)$, the probability of sampling $x_s$ at time $s < t$ when conditioned on
+$x_t$ and $x_0$, can be calculated analytically by (for $t>s>0$) using Bayers' rule:
+\begin{equation}
+  q(x_s|x_t,x_0)=\frac{q(x_t, x_s, x_0)}{q(x_t,x_0)}=\frac{q(x_t|x_s,x_0)q(x_s|x_0)q(x_0)}{q(x_t|x_0)q(x_0)}
+  = \frac{q(x_t|x_s)q(x_s|x_0)}{q(x_t|x_0)}
+\end{equation}
+\begin{equation}
+  q(x_s|x_t,x_0)=\exp \left(\frac{(x_s-\mu_s(t,x_t,x_0))^2}{2\Sigma_{s,t}^2}   \right)  
+\end{equation}
+\begin{eqnarray}
+  \mu_s(t, x_t, x_0)&=&\frac{1-\alpha_s}{1-\alpha_t}\sqrt{\frac{\alpha_t}{\alpha_s}}x_t
+  + \frac{1-\alpha_t/\alpha_s}{1-\alpha_t}\sqrt{\alpha_s}x_0  \\
+  \Sigma_{s,t}^2 &=&\frac{1-\alpha_s}{1-\alpha_t} \left( 1-\frac{\alpha_t}{\alpha_s} \right)
+\end{eqnarray}
+
+This is also a Gaussian distribution with mean $\mu_s$ and variance $\Sigma^2_{s,t}$,
+
+\subsubsection{DDPM reverse sampling formula}
+\begin{eqnarray}
+  x_0^\theta(x_t) &=& \frac{x_t-\sqrt{1-\alpha_t} \epsilon_t^\theta(x_t)}{\sqrt{\alpha_t}} \\
+  x_s &=& \frac{1-\alpha_s}{1-\alpha_t}\sqrt{\frac{\alpha_t}{\alpha_s}}x_t 
+  + \frac{1-\alpha_t/\alpha_s}{1-\alpha_t} \sqrt{\alpha_s} x_0^\theta(x_t) + \Sigma_{s,t} \epsilon
+\end{eqnarray}
+
+\subsubsection{DDIM reverse sampling formula}
+\begin{eqnarray}
+  x_0^\theta(x_t) &=& \frac{x_t-\sqrt{1-\alpha_t} \epsilon_t^\theta(x_t)}{\sqrt{\alpha_t}} \\
+  x_s &=& \sqrt{\alpha_s}x_0^\theta(x_t) + \sqrt{1-\alpha_s-\eta \Sigma_{s,t}^2} \epsilon_t^\theta(x_t) +
+  \eta \Sigma_{s,t} \epsilon \\
+  \eta &=& 1   \text{,        mathematically identical to DDPM sampling} \\
+  \eta &=& 0   \text{,        deterministic reverse sampling}
+\end{eqnarray}
+
+
+
+\end{document}
