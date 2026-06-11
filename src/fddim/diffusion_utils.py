@@ -142,7 +142,7 @@ class DiffusionUtility:
         reverse_mu_ddpm_xt = var_coefs_st * np.sqrt(alpha_ts)
         reverse_mu_ddpm_x0 = np.sqrt(alpha_s) * (1 - alpha_ts) / (1 - alpha_t)
         reverse_mu_ddim_x0 = np.sqrt(alpha_s)
-        reverse_mu_ddim_noise = np.sqrt(1 - alpha_s - self.ddim_eta * reverse_var_coefs)
+        reverse_mu_ddim_noise = np.sqrt(1 - alpha_s - self.ddim_eta**2 * reverse_var_coefs)
         # Convert to TensorFlow constants
         self.reverse_sigma_coefs = tf.constant(reverse_sigma_coefs, tf.float32)
         self.reverse_mu_ddpm_xt = tf.constant(reverse_mu_ddpm_xt, tf.float32)
