@@ -38,6 +38,29 @@ python scripts/run.py --config configs/cifar10_32x32.yaml --training
 python scripts/run.py --config configs/cifar10_32x32.yaml --imgen
 ```
 
+## CIFAR-10 scheduler/prediction sweep
+
+Run the 3x2 experiment matrix for:
+
+- `SCHEDULER`: `linear`, `cosine`, `my_cos6`
+- `PRED_TYPE`: `velocity`, `noise`
+
+The automation script trains each split sequentially, generates 5000 images from
+the latest EMA epoch checkpoint, and computes FID against CIFAR-10 test images:
+
+```bash
+python scripts/run_cifar10_scheduler_pred_sweep.py
+```
+
+Use `--dry-run` to write the split configs and print the commands without
+starting training:
+
+```bash
+python scripts/run_cifar10_scheduler_pred_sweep.py --dry-run
+```
+
+Results are written under `experiments/cifar10_scheduler_pred_sweep/results/`.
+
 ## CIFAR-10 dataset helper
 
 Use `utils/download_cifar10.py` to save CIFAR-10 images to `./datasets/cifar10`:

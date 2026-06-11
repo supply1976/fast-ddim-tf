@@ -40,7 +40,7 @@ TRAINING:
     INLINE_GEN:
         ENABLE: true  # whether to enable inline image generation during training for monitoring progress
         NUMS: 20      # number of images to generate for each inline generation
-        PERIOD: 1    # generate images every PERIOD epochs
+        PERIOD: 10    # generate images every PERIOD epochs
         REVERSE_STEPS: 100   # number of reverse diffusion steps for inline generation, typically smaller than the steps used for final generation to save time
 
 NETWORK:
