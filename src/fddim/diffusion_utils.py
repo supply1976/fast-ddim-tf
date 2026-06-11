@@ -119,36 +119,35 @@ class DiffusionUtility:
         self.mu_coefs = tf.constant(mu_coefs, tf.float32)
         self.var_coefs = tf.constant(var_coefs, tf.float32)
         self.sigma_coefs = tf.constant(sigma_coefs, tf.float32)
+        self.alphas_tf = tf.constant(self.alphas, tf.float32)
     
     def _compute_reverse_coefficients(self, t, s):
         """Compute coefficients for reverse diffusion process.
         Args:
-            t: Current timestep tensor
-            s: Previous timestep tensor
+            t: Current timestep tensor or scalar
+            s: Previous timestep tensor or scalar
             t > s
             Ex: t=10, s=9 for DDPM with 1 step reverse
                 t=10, s=8 for DDPM with 2 step reverse
         """
-        alpha_t = self.alphas[t]
-        alpha_s = self.alphas[s]
-        alpha_ts = alpha_t / alpha_s
+        alpha_t = tf.gather(self.alphas_tf, t)
+        alpha_s = tf.gather(self.alphas_tf, s)
+        alpha_ts = alpha_t / (alpha_s + 1e-8)
         # Compute variance coefficients
-        var_coefs_st = (1 - alpha_s) / (1 - alpha_t)
-        reverse_var_coefs = var_coefs_st * (1 - alpha_ts)
-        if not np.all(reverse_var_coefs >= 0):
-            raise ValueError("Reverse variance coefficients must be non-negative")
-        reverse_sigma_coefs = np.sqrt(reverse_var_coefs)
+        var_coefs_st = (1.0 - alpha_s) / (1.0 - alpha_t + 1e-8)
+        reverse_var_coefs = var_coefs_st * (1.0 - alpha_ts)
+        tf.debugging.assert_non_negative(reverse_var_coefs, message="Reverse variance coefficients must be non-negative")
+        reverse_sigma_coefs = tf.sqrt(reverse_var_coefs)
         # Compute mean coefficients for DDPM and DDIM
-        reverse_mu_ddpm_xt = var_coefs_st * np.sqrt(alpha_ts)
-        reverse_mu_ddpm_x0 = np.sqrt(alpha_s) * (1 - alpha_ts) / (1 - alpha_t)
-        reverse_mu_ddim_x0 = np.sqrt(alpha_s)
-        reverse_mu_ddim_noise = np.sqrt(1 - alpha_s - self.ddim_eta**2 * reverse_var_coefs)
-        # Convert to TensorFlow constants
-        self.reverse_sigma_coefs = tf.constant(reverse_sigma_coefs, tf.float32)
-        self.reverse_mu_ddpm_xt = tf.constant(reverse_mu_ddpm_xt, tf.float32)
-        self.reverse_mu_ddpm_x0 = tf.constant(reverse_mu_ddpm_x0, tf.float32)
-        self.reverse_mu_ddim_x0 = tf.constant(reverse_mu_ddim_x0, tf.float32)
-        self.reverse_mu_ddim_noise = tf.constant(reverse_mu_ddim_noise, tf.float32)
+        reverse_mu_ddpm_xt = var_coefs_st * tf.sqrt(alpha_ts)
+        reverse_mu_ddpm_x0 = tf.sqrt(alpha_s) * (1.0 - alpha_ts) / (1.0 - alpha_t + 1e-8)
+        reverse_mu_ddim_x0 = tf.sqrt(alpha_s)
+        reverse_mu_ddim_noise = tf.sqrt(tf.maximum(1.0 - alpha_s - self.ddim_eta**2 * reverse_var_coefs, 0.0))
+        self.reverse_sigma_coefs = reverse_sigma_coefs
+        self.reverse_mu_ddpm_xt = reverse_mu_ddpm_xt
+        self.reverse_mu_ddpm_x0 = reverse_mu_ddpm_x0
+        self.reverse_mu_ddim_x0 = reverse_mu_ddim_x0
+        self.reverse_mu_ddim_noise = reverse_mu_ddim_noise
 
     def q_sample(self, x_0, t, noise):
         sigma_t = tf.gather(self.sigma_coefs, t)[:, None, None, None]

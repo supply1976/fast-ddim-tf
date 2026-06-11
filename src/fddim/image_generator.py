@@ -437,13 +437,8 @@ class ImageGenerator:
     
     def _cleanup_memory(self):
         """Clean up memory after batch generation."""
-        # Clear TensorFlow session
-        tf.keras.backend.clear_session()
-        
-        # Force garbage collection
+        # Avoid clearing the global TensorFlow session between batches; this can break model state
         gc.collect()
-        
-        # Log memory cleanup
         logging.debug("[IMGEN] Memory cleanup completed")
     
     def _generate_single_batch(self,

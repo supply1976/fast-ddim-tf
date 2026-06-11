@@ -1,0 +1,38 @@
+[project]
+name = "fast-ddim-tf"
+version = "0.1.0"
+description = "Fast TensorFlow DDIM implementation with configurable UNet, diffusion schedules, and image generation."
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "MIT"}
+authors = [
+  {name = "supply1976"}
+]
+keywords = ["diffusion", "ddim", "tensorflow", "unet", "image-generation"]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "License :: OSI Approved :: MIT License",
+  "Framework :: TensorFlow",
+  "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = [
+  "numpy>=1.24",
+  "tensorflow>=2.13",
+  "pillow>=10.0",
+  "pyyaml>=6.0",
+  "tqdm>=4.0",
+  "scipy>=1.11",
+]
+
+[project.scripts]
+fast-ddim-tf = "scripts.run:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[build-system]
+requires = ["setuptools>=65.0", "wheel"]
+build-backend = "setuptools.build_meta"

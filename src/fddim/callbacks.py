@@ -7,8 +7,8 @@ import csv
 import numpy as np
 from scipy.linalg import sqrtm
 import tensorflow as tf
-import keras
-from keras.applications.inception_v3 import InceptionV3, preprocess_input
+from tensorflow import keras
+from tensorflow.keras.applications.inception_v3 import InceptionV3, preprocess_input
 from tqdm import tqdm
 
 

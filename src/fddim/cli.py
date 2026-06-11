@@ -25,7 +25,7 @@ import yaml
 import numpy as np
 import tensorflow as tf
 tf.get_logger().setLevel("ERROR")
-import keras
+from tensorflow import keras
 from .diffusion_model import DiffusionModel
 from .unet2d import build_model
 from .diffusion_utils import DiffusionUtility
