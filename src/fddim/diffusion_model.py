@@ -1,7 +1,7 @@
 import os
 import numpy as np
 import tensorflow as tf
-from tensorflow import keras
+from tensorflow import keras # type: ignore
 from .image_generator import ImageGenerator
 
 

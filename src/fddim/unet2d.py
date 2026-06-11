@@ -14,7 +14,7 @@ Example usage:
 
 import numpy as np
 import tensorflow as tf
-from tensorflow import keras
+from tensorflow import keras # type: ignore
 
 try:
     from .layers import (

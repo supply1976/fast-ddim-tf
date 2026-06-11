@@ -1,5 +1,5 @@
 import tensorflow as tf
-from tensorflow import keras
+from tensorflow import keras # type: ignore
 
 
 def get_activation(name):
