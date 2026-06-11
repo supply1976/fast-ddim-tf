@@ -257,7 +257,7 @@ class DiffusionModel(keras.Model):
         if self.save_period is not None:
             if (epoch+1) % self.save_period == 0 and epoch > 0:
                 path_unet_epo = os.path.join(savedir, output_name+f"epoch_{epo}")
-                self.ema_network.save(path_unet_epo+"_ema" + ".h5", include_optimizer=False)
+                self.ema_network.save(path_unet_epo+"_ema" + ".keras", include_optimizer=False)
     
     # Convenience methods that delegate to the image generator
     def sample_images(self, **kwargs):

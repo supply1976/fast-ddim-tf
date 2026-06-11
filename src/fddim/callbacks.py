@@ -256,13 +256,15 @@ class BestModelCheckpoint(keras.callbacks.Callback):
         if self.monitor_op(current, self.best):
             if self.verbose > 0:
                 logging.info(
-                    f"[CALLBACK] Epoch {epoch+1}: best {self.monitor} improved; saving full models to H5"
+                    f"[CALLBACK] Epoch {epoch+1}: best {self.monitor} improved; saving full models to Keras"
                 )
             self.best = current
-            # Save both the EMA and non-EMA full models (architecture + weights) in H5 format.
+            # Save both the EMA and non-EMA full models (architecture + weights) in Keras format.
             fp = str(self.filepath)
-            network_path = fp + '.h5'
-            ema_path = fp + '_ema.h5'
+            #network_path = fp + '.h5', legacy for keras < 3.0, for keras 3.0+, the recommended extension is .keras
+            network_path = fp + '.keras'
+            #ema_path = fp + '_ema.h5', legacy for keras < 3.0, for keras 3.0+, the recommended extension is .keras
+            ema_path = fp + '_ema.keras'
             # Save models without optimizer state to keep files lightweight and portable
             try:
                 self.model.network.save(network_path, include_optimizer=False)
@@ -270,7 +272,7 @@ class BestModelCheckpoint(keras.callbacks.Callback):
                 if self.verbose > 0:
                     logging.info(f"[CALLBACK] Saved models: {network_path} and {ema_path}")
             except Exception:
-                logging.exception("[CALLBACK] Error saving full models to H5")
+                logging.exception("[CALLBACK] Error saving full models to Keras")
 
 
 class InlineImageGenerationCallback(keras.callbacks.Callback):
@@ -290,6 +292,8 @@ class InlineImageGenerationCallback(keras.callbacks.Callback):
             logging.info(
                 f"[CALLBACK] Inline generating {self.num_images} images at epoch {epoch+1}..."
             )
+            savedir = os.path.join(self.savedir, f"epoch_{str(epoch+1).zfill(5)}")
+            os.makedirs(savedir, exist_ok=True)
             images = None
             # generate EMA model images for inline check
             try:
@@ -310,15 +314,13 @@ class InlineImageGenerationCallback(keras.callbacks.Callback):
                 elif images.shape[-1]>=4:
                     # for >= 4 channels, concatenate such that [B, H, W, C] -> [B, H, W*C, 1]
                     images = np.concatenate([images[..., i:i+1] for i in range(images.shape[-1])], axis=2)
-                if images.shape[0] % 2 != 0:
-                    images = np.concatenate([images, images[-1:]], axis=0)
-                images = [np.concatenate(_, axis=1) for _ in np.split(images, 2, axis=0)]
-                images = np.concatenate(images, axis=0)
-                images = (images*255.0).astype(np.uint8)
-                filename = f"epoch_{str(epoch+1).zfill(5)}.png"
-                filepath = f"{self.savedir}/{filename}"
-                keras.utils.save_img(filepath, images)
-                logging.info(f"[CALLBACK] Images saved to {filepath}")
+                # save images to png files
+                for i, img in enumerate(images):
+                    img = (img * 255.0).astype(np.uint8)
+                    filename = f"img_{str(i+1).zfill(4)}.png"
+                    filepath = os.path.join(savedir, filename)
+                    keras.utils.save_img(filepath, img)
+                logging.info(f"[CALLBACK] Inline Images Gen saved to {savedir}")
 
 
 # TODO (not completed): Implement a more comprehensive callback for FID evaluation)
@@ -385,7 +387,7 @@ class InlineEvalCallback(keras.callbacks.Callback):
             self.best = fid_value
             self.wait = 0
             if self.savedir is not None:
-                best_path = os.path.join(self.savedir, "best_model.h5")
+                best_path = os.path.join(self.savedir, "best_model.keras")
                 self.model.ema_network.save(best_path, include_optimizer=False)
                 logging.info(f"[EVAL] best model saved to {best_path}")
         else:
