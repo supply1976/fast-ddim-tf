@@ -42,10 +42,10 @@ python scripts/run.py --config configs/cifar10_32x32.yaml --imgen
 
 Run the 3x2 experiment matrix for:
 
-- `SCHEDULER`: `linear`, `cosine`, `my_cos6`
+- `SCHEDULER`: `linear`, `cosine`
 - `PRED_TYPE`: `velocity`, `noise`
 
-The automation script trains each split sequentially, generates 5000 images from
+The automation script trains each split sequentially, generates 50,000 images from
 the latest EMA epoch checkpoint, and computes FID against CIFAR-10 test images:
 
 ```bash

@@ -3,14 +3,14 @@
 
 This script expands a base config into a 3x2 sweep:
 
-  scheduler in {linear, cosine, my_cos6}
+  scheduler in {linear, cosine}
   pred_type in {velocity, noise}
 
 For each split it:
   1. writes a derived training/generation config,
   2. runs training sequentially,
   3. finds the latest EMA epoch checkpoint,
-  4. generates 5000 images as NPZ batches,
+  4. generates 50000 images as NPZ batches,
   5. computes FID against CIFAR-10 test images.
 
 The script intentionally shells out to scripts/run.py so it reuses the same CLI
@@ -55,8 +55,6 @@ SPLITS = [
     Split("linear", "noise"),
     Split("cosine", "velocity"),
     Split("cosine", "noise"),
-    Split("my_cos6", "velocity"),
-    Split("my_cos6", "noise"),
 ]
 
 
@@ -89,7 +87,7 @@ def update_config_for_split(
     cfg["DIFFUSION_SCHEDULER"]["PRED_TYPE"] = split.pred_type
 
     cfg["TRAINING"]["OUTPUT_DIR"] = str(output_root / split.name)
-    cfg["TRAINING"]["HYPER_PARAMETERS"]["SAVE_PERIOD"] = 1
+    cfg["TRAINING"]["HYPER_PARAMETERS"]["SAVE_PERIOD"] = 10
     if disable_inline_gen:
         cfg["TRAINING"].setdefault("INLINE_GEN", {})["ENABLE"] = False
 
@@ -240,6 +238,8 @@ def write_results_csv(path: Path, rows: list[dict[str, Any]]) -> None:
         "scheduler",
         "pred_type",
         "fid",
+        "num_real_images",
+        "num_generated_images",
         "checkpoint",
         "generated_dir",
     ]
@@ -254,7 +254,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--base-config", type=Path, default=Path("configs/cifar10_32x32.yaml"))
     parser.add_argument("--work-dir", type=Path, default=Path("experiments/cifar10_scheduler_pred_sweep"))
     parser.add_argument("--output-root", type=Path, default=Path("training_outputs/cifar10_scheduler_pred_sweep"))
-    parser.add_argument("--num-gen-images", type=int, default=5000)
+    parser.add_argument("--num-gen-images", type=int, default=50000)
     parser.add_argument("--gen-batch-size", type=int, default=100)
     parser.add_argument("--fid-batch-size", type=int, default=64)
     parser.add_argument("--reverse-steps", type=int, default=None)
@@ -288,6 +288,7 @@ def main() -> None:
 
     results: list[dict[str, Any]] = []
     real_features: np.ndarray | None = None
+    num_real_images: int | None = None
 
     for split in SPLITS:
         print(f"\n=== Split: {split.name} ===", flush=True)
@@ -332,8 +333,12 @@ def main() -> None:
 
         if real_features is None:
             real_images = load_real_cifar10_images(dataset_path, real_count)
+            num_real_images = int(real_images.shape[0])
+            print(f"Loaded {num_real_images} real images for FID reference", flush=True)
             real_features = inception_features(real_images, args.fid_batch_size, args.inception_weights)
 
+        num_generated_images = int(generated_images.shape[0])
+        print(f"Loaded {num_generated_images} generated images for FID[{split.name}]", flush=True)
         fake_features = inception_features(generated_images, args.fid_batch_size, args.inception_weights)
         fid = calculate_fid(real_features, fake_features)
         print(f"FID[{split.name}] = {fid:.6f}", flush=True)
@@ -343,6 +348,8 @@ def main() -> None:
             "scheduler": split.scheduler,
             "pred_type": split.pred_type,
             "fid": f"{fid:.6f}",
+            "num_real_images": num_real_images,
+            "num_generated_images": num_generated_images,
             "checkpoint": str(checkpoint),
             "generated_dir": str(generated_dir),
         }

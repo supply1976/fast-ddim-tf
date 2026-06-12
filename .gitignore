@@ -33,6 +33,7 @@ tmp/
 # local only
 training_outputs/
 datasets/
+experiments/
 
 # PyInstaller
 #   Usually these files are written by a python script from a template

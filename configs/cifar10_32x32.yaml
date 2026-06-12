@@ -16,7 +16,7 @@ DATASET:
         VALIDATION_SPLIT: null   # float in (0, 1), or null
 
 DIFFUSION_SCHEDULER:
-    SCHEDULER: linear          # linear | cosine | my_cosine | my_cos6
+    SCHEDULER: cosine          # linear | cosine | my_cosine | my_cos6
     TIMESTEPS: 1000
     PRED_TYPE: velocity        # velocity | image | noise
 
@@ -29,7 +29,7 @@ TRAINING:
     HYPER_PARAMETERS:
         EPOCHS: 100         # total epochs to train
         SAVE_PERIOD: 10     # save model every SAVE_PERIOD epochs
-        BATCH_SIZE: 32      # batch size for training
+        BATCH_SIZE: 128      # batch size for training
         GRAD_ACCUM_STEPS: 1 # gradient accumulation steps, effective batch size = BATCH_SIZE * GRAD_ACCUM_STEPS
         STEPS_PER_EPOCH: 2000    # set this OR TOTAL_GLOBAL_STEPS
         TOTAL_GLOBAL_STEPS: null # set this OR STEPS_PER_EPOCH, if not set, total global steps = STEPS_PER_EPOCH * EPOCHS / GRAD_ACCUM_STEPS, it determines the total number of optimizer updates (global steps) for training, used for learning rate scheduling and training progress tracking
@@ -49,11 +49,11 @@ NETWORK:
     BLOCK_SIZE: 1
     NUM_RES_BLOCKS: 2
     NORM_GROUPS: 32
-    BASE_CHANNELS: 64
-    CHANNEL_MULTIPLIER: [1, 2, 4]
-    HAS_ATTENTION: [false, true, true]
+    BASE_CHANNELS: 128
+    CHANNEL_MULTIPLIER: [1, 2, 2, 4]
+    HAS_ATTENTION: [false, false, true, true]
     MID_ATTENTION: true
-    NUM_HEADS: 1
+    NUM_HEADS: 4
     EMBEDDING_TYPE: positional # positional | fourier
     EMBEDDING_DIM: null
     TIME_EMB_DIM: null
@@ -75,7 +75,7 @@ IMAGE_GENERATION:
     CANVAS_STRIDE: null
     DDIM_ETA: 1.0
     RANDOM_SEED: null
-    TARGET_IMAGE_SIZE: null    # int or [H, W]
+    TARGET_IMAGE_SIZE: 32    # int or [H, W]
     _SELF_GUIDE_SCALE: 0.0
     _SDEDIT_STRENGTH: 0.5
     CLIP_DENOISE: true
