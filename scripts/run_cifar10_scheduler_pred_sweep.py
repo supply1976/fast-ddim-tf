@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""Run CIFAR-10 scheduler/prediction-type diffusion experiments.
+"""Run CIFAR-10 scheduler/prediction/loss-weight diffusion experiments.
 
-This script expands a base config into a 3x2 sweep:
+This script expands a base config into a 2x2x2 sweep:
 
   scheduler in {linear, cosine}
   pred_type in {velocity, noise}
+  loss_weight_type in {constant, min_snr}
 
 For each split it:
   1. writes a derived training/generation config,
@@ -52,14 +53,14 @@ class Split:
 
 
 SPLITS = [
-    Split("linear", "velocity", "constant"),
-    Split("linear", "noise", "constant"),
+    Split("cosine", "velocity", "min_snr"),
     Split("cosine", "velocity", "constant"),
+    Split("cosine", "noise", "min_snr"),
     Split("cosine", "noise", "constant"),
     Split("linear", "velocity", "min_snr"),
+    Split("linear", "velocity", "constant"),
     Split("linear", "noise", "min_snr"),
-    Split("cosine", "velocity", "min_snr"),
-    Split("cosine", "noise", "min_snr"),
+    Split("linear", "noise", "constant"),
 ]
 
 
@@ -81,7 +82,7 @@ def deep_copy_config(config: dict[str, Any]) -> dict[str, Any]:
 def update_config_for_split(
     base: dict[str, Any],
     split: Split,
-    train_batch_size: int,
+    train_batch_size: int | None,
     output_root: Path,
     num_gen_images: int,
     gen_batch_size: int | None,
@@ -97,7 +98,8 @@ def update_config_for_split(
     cfg["TRAINING"]["HYPER_PARAMETERS"]["SAVE_PERIOD"] = 10
     if disable_inline_gen:
         cfg["TRAINING"].setdefault("INLINE_GEN", {})["ENABLE"] = False
-    cfg["TRAINING"]["HYPER_PARAMETERS"]["BATCH_SIZE"] = train_batch_size
+    if train_batch_size is not None:
+        cfg["TRAINING"]["HYPER_PARAMETERS"]["BATCH_SIZE"] = train_batch_size
 
     imgen = cfg["IMAGE_GENERATION"]
     imgen["MODEL_PATH"] = ""
@@ -270,6 +272,7 @@ def write_results_csv(path: Path, rows: list[dict[str, Any]]) -> None:
         "split",
         "scheduler",
         "pred_type",
+        "loss_weight_type",
         "fid",
         "num_real_images",
         "num_generated_images",
@@ -288,7 +291,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--work-dir", type=Path, default=Path("experiments/cifar10_scheduler_pred_sweep"))
     parser.add_argument("--output-root", type=Path, default=Path("training_outputs/cifar10_scheduler_pred_sweep"))
     parser.add_argument("--num-gen-images", type=int, default=50000)
-    parser.add_argument("--train-batch-size", type=int, default=32)
+    parser.add_argument(
+        "--train-batch-size",
+        type=int,
+        default=None,
+        help="Override TRAINING.HYPER_PARAMETERS.BATCH_SIZE. Defaults to the base config value.",
+    )
     parser.add_argument("--gen-batch-size", type=int, default=100)
     parser.add_argument("--fid-batch-size", type=int, default=64)
     parser.add_argument("--reverse-steps", type=int, default=None)
@@ -330,6 +338,7 @@ def main() -> None:
         split_cfg = update_config_for_split(
             base_cfg,
             split,
+            args.train_batch_size,
             output_root,
             args.num_gen_images,
             args.gen_batch_size,
@@ -383,6 +392,7 @@ def main() -> None:
             "split": split.name,
             "scheduler": split.scheduler,
             "pred_type": split.pred_type,
+            "loss_weight_type": split.loss_weight_type,
             "fid": f"{fid:.6f}",
             "num_real_images": num_real_images,
             "num_generated_images": num_generated_images,
