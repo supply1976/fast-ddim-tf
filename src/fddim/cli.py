@@ -930,6 +930,9 @@ class ImageGenerator:
     """Handles the image generation workflow."""
     
     def __init__(self, config_file: str):
+        gpus = tf.config.list_physical_devices("GPU")
+        if gpus:
+            [tf.config.experimental.set_memory_growth(gpu, True) for gpu in gpus]
         configs = ConfigManager.parse_config(config_file)    
         self.config_file = config_file
         self.config_dir = os.path.dirname(config_file)
