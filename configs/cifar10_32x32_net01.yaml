@@ -1,0 +1,95 @@
+# Config template
+# Keep top-level sections: DATASET, DIFFUSION_SCHEDULER, TRAINING, NETWORK, IMAGE_GENERATION
+
+DATASET:
+    NAME: cifar10
+    PATH: ./datasets/cifar10/train/
+    LABEL_KEY: null # optional, specify the key for labels in .npz files if applicable, default is 'label', useful for class-conditional training
+    PREPROCESSING:
+        IMG_RESIZE: null         # int or null, if set, it applies a resize to the input images before cropping. The resizing is isotropic, i.e., it resizes the shorter edge to IMG_RESIZE while keeping the aspect ratio. If null, no resizing is applied.
+        CROP_SIZE: null          # int or null, if set, it applies a crop to the input images (after resizing if IMG_RESIZE is set). If int, it crops a square region of CROP_SIZE x CROP_SIZE. If null, no cropping is applied and the original image size is used for training.
+        CROP_TYPE: center        # center | random | corner
+        CROP_POSITION: center    # center | top_left | top_right | bottom_left | bottom_right
+        AUGMENT: false
+        AUGMENT_TYPE: null       # fliplr | flipud | rotate | flip-rotate
+        CACHE: false
+        VALIDATION_SPLIT: null   # float in (0, 1), or null
+
+DIFFUSION_SCHEDULER:
+    SCHEDULER: cosine          # linear | cosine | my_cosine | my_cos6
+    TIMESTEPS: 1000
+    PRED_TYPE: velocity        # velocity | image | noise
+
+TRAINING:
+    OUTPUT_DIR: ./training_outputs # output directory for training logs and model checkpoints
+    LOAD_PRETRAINED: null      # path to .h5, or null
+    LOSS_FN: MSE               # MSE | MAE | BCE
+    LOSS_WEIGHT_TYPE: constant #min_snr  # constant | min_snr
+    MIN_SNR_GAMMA: 5.0
+    HYPER_PARAMETERS:
+        EPOCHS: 100         # total epochs to train
+        SAVE_PERIOD: 10     # save model every SAVE_PERIOD epochs
+        BATCH_SIZE: 32      # batch size for training
+        GRAD_ACCUM_STEPS: 1 # gradient accumulation steps, effective batch size = BATCH_SIZE * GRAD_ACCUM_STEPS
+        STEPS_PER_EPOCH: 2000    # set this OR TOTAL_GLOBAL_STEPS
+        TOTAL_GLOBAL_STEPS: null # set this OR STEPS_PER_EPOCH, if not set, total global steps = STEPS_PER_EPOCH * EPOCHS / GRAD_ACCUM_STEPS, it determines the total number of optimizer updates (global steps) for training, used for learning rate scheduling and training progress tracking
+        EMA: 0.999    # exponential moving average decay rate for model weights
+        LR_TYPE: constant   # constant | warmup_cosine | cosine_decay
+        LEARNING_RATE: 1.0e-4
+        WARMUP_STEPS: null # if lr_type is warmup_cosine, the number of warmup steps. If null, it defaults to total_global_steps // 20
+    INLINE_GEN:
+        ENABLE: true  # whether to enable inline image generation during training for monitoring progress
+        NUMS: 20      # number of images to generate for each inline generation
+        PERIOD: 10    # generate images every PERIOD epochs
+        REVERSE_STEPS: 100   # number of reverse diffusion steps for inline generation, typically smaller than the steps used for final generation to save time
+
+NETWORK:
+    IMAGE_SIZE: 32     # int or [H, W]; runtime may infer from data
+    IMAGE_CHANNELS: 3    # typically 1 for grayscale, 3 for RGB, or arbitrary from npz; runtime may infer from data
+    BLOCK_SIZE: 1
+    NUM_RES_BLOCKS: 2
+    NORM_GROUPS: 32
+    BASE_CHANNELS: 64
+    CHANNEL_MULTIPLIER: [1, 2, 4]
+    HAS_ATTENTION: [false, true, true]
+    MID_ATTENTION: true
+    NUM_HEADS: 1
+    EMBEDDING_TYPE: positional # positional | fourier
+    EMBEDDING_DIM: null
+    TIME_EMB_DIM: null
+    DROPOUT_RATE: 0.1
+    KERNEL_SIZE: 3
+    USE_CROSS_ATTENTION: false
+    NUM_CLASSES: null
+    CLASS_EMB_DIM: null
+    SKIP_STRATEGY: per_block   # per_block | stage
+
+IMAGE_GENERATION:
+    MODEL_PATH: ""   # path to the trained model .h5 file for image generation
+    GEN_TASK: random           # random | canvas_gen | channel_inpaint | space_inpaint | overlap_inpaint | img2img
+    NUM_GEN_IMAGES: 20
+    BATCH_SIZE: null
+    REVERSE_STEPS: 100
+    CANVAS_SHAPE: null         # [H, W] for canvas_gen
+    CANVAS_PATCH_SIZE: null
+    CANVAS_STRIDE: null
+    DDIM_ETA: 1.0
+    RANDOM_SEED: null
+    TARGET_IMAGE_SIZE: 32    # int or [H, W]
+    _SELF_GUIDE_SCALE: 0.0
+    _SDEDIT_STRENGTH: 0.5
+    CLIP_DENOISE: true
+    OUTPUT_OPTIONS:
+        SAVE_DIR: null
+        SAVE_INTERMEDIATE: false
+        SAVE_FORMAT: png         # png | npz
+    # advanced conditioning options for image generation tasks like inpainting or img2img, these are optional and can be null if not applicable for the gen_task
+    CONDITIONING:
+        CLASS_LABEL: null        # int | [int, ...] | null
+        FREEZE_CHANNEL: null     # int | [int, ...] | null
+        SPACE_INPAINT_BBOX: null # [r0, r1, c0, c1] or null
+        BBOX_TO_INPAINT: true
+        EXTERNAL_INPUT: null     # path to .npz/.png/.jpg/.jpeg
+        OVERLAP_DIR: null        # north | east | south | west
+        OVERLAP_SIZE: null
+
