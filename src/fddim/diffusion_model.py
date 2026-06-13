@@ -94,11 +94,11 @@ class DiffusionModel(keras.Model):
             t: Timestep tensor of shape (batch_size,)
             
         Returns:
-            Loss weights of shape (batch_size, 1, 1, 1)
+            Loss weights of shape (batch_size, 1, 1)
         """
         if self.loss_weight_type == 'constant':
             # Constant weighting (current behavior)
-            return tf.ones_like(t, dtype=tf.float32)[:, None, None, None]
+            return tf.ones_like(t, dtype=tf.float32)[:, None, None]
         elif self.loss_weight_type == 'min_snr':
             # Min-SNR weighting: weight = min(SNR(t), gamma) / SNR(t)
             # Reference: "Efficient Diffusion Training via Min-SNR Weighting Strategy"
@@ -107,7 +107,7 @@ class DiffusionModel(keras.Model):
             min_snr = tf.minimum(snr_t, self.min_snr_gamma)
             # Compute weight
             weights = min_snr / (snr_t + 1e-8)
-            return weights[:, None, None, None]
+            return weights[:, None, None]
         else:
             raise ValueError(f"Unknown loss_weight_type: {self.loss_weight_type}")
 

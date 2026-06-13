@@ -10,7 +10,7 @@ For each split it:
   1. writes a derived training/generation config,
   2. runs training sequentially,
   3. finds the latest EMA epoch checkpoint,
-  4. generates 50000 images as NPZ batches,
+  4. generates 50000 images,
   5. computes FID against CIFAR-10 test images.
 
 The script intentionally shells out to scripts/run.py so it reuses the same CLI
@@ -42,19 +42,24 @@ RUN_PY = ROOT / "scripts" / "run.py"
 
 @dataclass(frozen=True)
 class Split:
-    scheduler: str
-    pred_type: str
+    scheduler: str # linear | cosine
+    pred_type: str # velocity | noise
+    loss_weight_type: str # constant | min_snr
 
     @property
     def name(self) -> str:
-        return f"{self.scheduler}_{self.pred_type}"
+        return f"{self.scheduler}_{self.pred_type}_{self.loss_weight_type}"
 
 
 SPLITS = [
-    Split("linear", "velocity"),
-    Split("linear", "noise"),
-    Split("cosine", "velocity"),
-    Split("cosine", "noise"),
+    Split("linear", "velocity", "constant"),
+    Split("linear", "noise", "constant"),
+    Split("cosine", "velocity", "constant"),
+    Split("cosine", "noise", "constant"),
+    Split("linear", "velocity", "min_snr"),
+    Split("linear", "noise", "min_snr"),
+    Split("cosine", "velocity", "min_snr"),
+    Split("cosine", "noise", "min_snr"),
 ]
 
 
@@ -76,20 +81,23 @@ def deep_copy_config(config: dict[str, Any]) -> dict[str, Any]:
 def update_config_for_split(
     base: dict[str, Any],
     split: Split,
+    train_batch_size: int,
     output_root: Path,
     num_gen_images: int,
     gen_batch_size: int | None,
     reverse_steps: int | None,
+    save_format: str,
     disable_inline_gen: bool,
 ) -> dict[str, Any]:
     cfg = deep_copy_config(base)
     cfg["DIFFUSION_SCHEDULER"]["SCHEDULER"] = split.scheduler
     cfg["DIFFUSION_SCHEDULER"]["PRED_TYPE"] = split.pred_type
-
+    cfg["TRAINING"]["LOSS_WEIGHT_TYPE"] = split.loss_weight_type
     cfg["TRAINING"]["OUTPUT_DIR"] = str(output_root / split.name)
     cfg["TRAINING"]["HYPER_PARAMETERS"]["SAVE_PERIOD"] = 10
     if disable_inline_gen:
         cfg["TRAINING"].setdefault("INLINE_GEN", {})["ENABLE"] = False
+    cfg["TRAINING"]["HYPER_PARAMETERS"]["BATCH_SIZE"] = train_batch_size
 
     imgen = cfg["IMAGE_GENERATION"]
     imgen["MODEL_PATH"] = ""
@@ -102,7 +110,7 @@ def update_config_for_split(
     imgen["TARGET_IMAGE_SIZE"] = cfg["NETWORK"]["IMAGE_SIZE"]
     imgen["OUTPUT_OPTIONS"]["SAVE_DIR"] = str(output_root / split.name / "generated")
     imgen["OUTPUT_OPTIONS"]["SAVE_INTERMEDIATE"] = False
-    imgen["OUTPUT_OPTIONS"]["SAVE_FORMAT"] = "npz"
+    imgen["OUTPUT_OPTIONS"]["SAVE_FORMAT"] = save_format
     imgen.setdefault("CONDITIONING", {})["EXTERNAL_INPUT"] = None
     imgen["CONDITIONING"]["CLASS_LABEL"] = None
     return cfg
@@ -165,6 +173,31 @@ def load_generated_npz_images(generated_root: Path) -> np.ndarray:
         raise FileNotFoundError(f"No generated NPZ files with 'images' key found under {generated_root}")
     images = np.concatenate(arrays, axis=0)
     return np.clip(images, 0.0, 1.0)
+
+
+def load_generated_png_images(generated_root: Path, count: int) -> np.ndarray:
+    image_paths = sorted(
+        list(generated_root.glob("**/*.png"))
+        + list(generated_root.glob("**/*.jpg"))
+        + list(generated_root.glob("**/*.jpeg"))
+    )
+    if not image_paths:
+        raise FileNotFoundError(f"No generated PNG/JPEG files found under {generated_root}")
+
+    images = []
+    for path in image_paths[:count]:
+        with Image.open(path) as img:
+            arr = np.asarray(img.convert("RGB"), dtype=np.float32) / 255.0
+        images.append(arr)
+    return np.stack(images, axis=0)
+
+
+def load_generated_images(generated_root: Path, save_format: str, count: int) -> np.ndarray:
+    if save_format == "npz":
+        return load_generated_npz_images(generated_root)[:count]
+    if save_format == "png":
+        return load_generated_png_images(generated_root, count)
+    raise ValueError(f"Unsupported generated save_format: {save_format}")
 
 
 def load_real_cifar10_images(dataset_path: Path, count: int) -> np.ndarray:
@@ -255,13 +288,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--work-dir", type=Path, default=Path("experiments/cifar10_scheduler_pred_sweep"))
     parser.add_argument("--output-root", type=Path, default=Path("training_outputs/cifar10_scheduler_pred_sweep"))
     parser.add_argument("--num-gen-images", type=int, default=50000)
+    parser.add_argument("--train-batch-size", type=int, default=32)
     parser.add_argument("--gen-batch-size", type=int, default=100)
     parser.add_argument("--fid-batch-size", type=int, default=64)
     parser.add_argument("--reverse-steps", type=int, default=None)
+    parser.add_argument("--save-format", choices=["png", "npz"], default="png")
     parser.add_argument("--inception-weights", type=str, default=None, help="Path to local InceptionV3 no-top weights. Defaults to Keras 'imagenet'.")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--skip-training", action="store_true", help="Reuse existing latest checkpoints.")
-    parser.add_argument("--skip-generation", action="store_true", help="Reuse existing generated NPZ files.")
+    parser.add_argument("--skip-generation", action="store_true", help="Reuse existing generated image files.")
     parser.add_argument(
         "--enable-inline-gen",
         action="store_true",
@@ -299,6 +334,7 @@ def main() -> None:
             args.num_gen_images,
             args.gen_batch_size,
             args.reverse_steps,
+            args.save_format,
             not args.enable_inline_gen,
         )
         split_config_path = config_dir / f"{split.name}.yaml"
@@ -324,7 +360,7 @@ def main() -> None:
             run_command([sys.executable, str(RUN_PY), "--config", str(split_config_path), "--imgen"], args.dry_run)
 
         generated_dir = find_latest_generation_dir(generated_save_root)
-        generated_images = load_generated_npz_images(generated_dir)[: args.num_gen_images]
+        generated_images = load_generated_images(generated_dir, args.save_format, args.num_gen_images)
         if generated_images.shape[0] < args.num_gen_images:
             raise RuntimeError(
                 f"{split.name} generated only {generated_images.shape[0]} images; "
