@@ -229,7 +229,7 @@ def inception_features(
     inception_weights: str | None,
 ) -> np.ndarray:
     import tensorflow as tf
-    from tensorflow.keras.applications.inception_v3 import InceptionV3, preprocess_input
+    from tensorflow.keras.applications.inception_v3 import InceptionV3, preprocess_input # pyright: ignore[reportMissingImports]
 
     weights: str | None = inception_weights if inception_weights else "imagenet"
     model = InceptionV3(include_top=False, pooling="avg", weights=weights, input_shape=(299, 299, 3))
