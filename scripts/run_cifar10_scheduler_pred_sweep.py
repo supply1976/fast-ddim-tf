@@ -15,7 +15,9 @@ For each split it:
   5. computes FID against CIFAR-10 test images.
 
 The script intentionally shells out to scripts/run.py so it reuses the same CLI
-path as normal training and generation.
+path as normal training and generation. FID is also computed in a short-lived
+subprocess by default so TensorFlow/Inception memory is released before the next
+training split starts.
 """
 
 from __future__ import annotations
@@ -123,6 +125,44 @@ def run_command(cmd: list[str], dry_run: bool) -> None:
     if dry_run:
         return
     subprocess.run(cmd, cwd=ROOT, check=True)
+
+
+def run_fid_subprocess(
+    dataset_path: Path,
+    generated_dir: Path,
+    split: Split,
+    args: argparse.Namespace,
+    results_dir: Path,
+) -> dict[str, Any]:
+    fid_output = results_dir / f".fid_{split.name}.json"
+    cmd = [
+        sys.executable,
+        str(Path(__file__).resolve()),
+        "--compute-fid-only",
+        "--real-dataset-path",
+        str(dataset_path),
+        "--generated-dir",
+        str(generated_dir),
+        "--fid-output",
+        str(fid_output),
+        "--num-gen-images",
+        str(args.num_gen_images),
+        "--fid-batch-size",
+        str(args.fid_batch_size),
+        "--save-format",
+        args.save_format,
+        "--fid-device",
+        args.fid_device,
+    ]
+    if args.inception_weights:
+        cmd.extend(["--inception-weights", args.inception_weights])
+
+    print(" ".join(cmd), flush=True)
+    subprocess.run(cmd, cwd=ROOT, check=True)
+    with fid_output.open("r") as f:
+        payload = json.load(f)
+    fid_output.unlink(missing_ok=True)
+    return payload
 
 
 def find_latest_run_dir(split_output_dir: Path) -> Path:
@@ -266,6 +306,52 @@ def calculate_fid(real_features: np.ndarray, fake_features: np.ndarray) -> float
     return float(fid)
 
 
+def compute_fid_only(args: argparse.Namespace) -> None:
+    if args.real_dataset_path is None:
+        raise ValueError("--real-dataset-path is required with --compute-fid-only")
+    if args.generated_dir is None:
+        raise ValueError("--generated-dir is required with --compute-fid-only")
+    if args.fid_output is None:
+        raise ValueError("--fid-output is required with --compute-fid-only")
+    if args.fid_device == "cpu":
+        os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
+
+    dataset_path = args.real_dataset_path.resolve()
+    generated_dir = args.generated_dir.resolve()
+    fid_output = args.fid_output.resolve()
+    fid_output.parent.mkdir(parents=True, exist_ok=True)
+
+    print(
+        f"[FID] Loading {args.num_gen_images} real and generated images "
+        f"for FID on {args.fid_device.upper()}",
+        flush=True,
+    )
+    real_images = load_real_cifar10_images(dataset_path, args.num_gen_images)
+    generated_images = load_generated_images(generated_dir, args.save_format, args.num_gen_images)
+    if generated_images.shape[0] < args.num_gen_images:
+        raise RuntimeError(
+            f"Generated only {generated_images.shape[0]} images under {generated_dir}; "
+            f"expected {args.num_gen_images}"
+        )
+
+    num_real_images = int(real_images.shape[0])
+    num_generated_images = int(generated_images.shape[0])
+    print(f"[FID] Loaded {num_real_images} real images", flush=True)
+    print(f"[FID] Loaded {num_generated_images} generated images", flush=True)
+
+    real_features = inception_features(real_images, args.fid_batch_size, args.inception_weights)
+    fake_features = inception_features(generated_images, args.fid_batch_size, args.inception_weights)
+    fid = calculate_fid(real_features, fake_features)
+    payload = {
+        "fid": fid,
+        "num_real_images": num_real_images,
+        "num_generated_images": num_generated_images,
+    }
+    with fid_output.open("w") as f:
+        json.dump(payload, f, indent=2)
+    print(f"[FID] FID = {fid:.6f}", flush=True)
+
+
 def write_results_csv(path: Path, rows: list[dict[str, Any]]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     fieldnames = [
@@ -286,7 +372,7 @@ def write_results_csv(path: Path, rows: list[dict[str, Any]]) -> None:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Run CIFAR-10 scheduler/prediction sweep.")
+    parser = argparse.ArgumentParser(description="Run CIFAR-10 scheduler/prediction/loss-weight sweep.")
     parser.add_argument("--base-config", type=Path, default=Path("configs/cifar10_32x32.yaml"))
     parser.add_argument("--work-dir", type=Path, default=Path("experiments/cifar10_scheduler_pred_sweep"))
     parser.add_argument("--output-root", type=Path, default=Path("training_outputs/cifar10_scheduler_pred_sweep"))
@@ -299,6 +385,12 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--gen-batch-size", type=int, default=100)
     parser.add_argument("--fid-batch-size", type=int, default=64)
+    parser.add_argument(
+        "--fid-device",
+        choices=["cpu", "gpu"],
+        default="cpu",
+        help="Device used by the FID subprocess. CPU avoids keeping GPU memory in the parent sweep.",
+    )
     parser.add_argument("--reverse-steps", type=int, default=None)
     parser.add_argument("--save-format", choices=["png", "npz"], default="png")
     parser.add_argument("--inception-weights", type=str, default=None, help="Path to local InceptionV3 no-top weights. Defaults to Keras 'imagenet'.")
@@ -310,11 +402,19 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Keep inline generation enabled during training. Disabled by default for sweep speed.",
     )
+    parser.add_argument("--compute-fid-only", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--real-dataset-path", type=Path, default=None, help=argparse.SUPPRESS)
+    parser.add_argument("--generated-dir", type=Path, default=None, help=argparse.SUPPRESS)
+    parser.add_argument("--fid-output", type=Path, default=None, help=argparse.SUPPRESS)
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
+    if args.compute_fid_only:
+        compute_fid_only(args)
+        return
+
     base_config_path = (ROOT / args.base_config).resolve() if not args.base_config.is_absolute() else args.base_config
     work_dir = (ROOT / args.work_dir).resolve() if not args.work_dir.is_absolute() else args.work_dir
     output_root = (ROOT / args.output_root).resolve() if not args.output_root.is_absolute() else args.output_root
@@ -324,14 +424,11 @@ def main() -> None:
     results_dir = work_dir / "results"
     results_dir.mkdir(parents=True, exist_ok=True)
 
-    real_count = args.num_gen_images
     dataset_path = Path(base_cfg["DATASET"]["PATH"])
     if not dataset_path.is_absolute():
         dataset_path = ROOT / dataset_path
 
     results: list[dict[str, Any]] = []
-    real_features: np.ndarray | None = None
-    num_real_images: int | None = None
 
     for split in SPLITS:
         print(f"\n=== Split: {split.name} ===", flush=True)
@@ -369,23 +466,10 @@ def main() -> None:
             run_command([sys.executable, str(RUN_PY), "--config", str(split_config_path), "--imgen"], args.dry_run)
 
         generated_dir = find_latest_generation_dir(generated_save_root)
-        generated_images = load_generated_images(generated_dir, args.save_format, args.num_gen_images)
-        if generated_images.shape[0] < args.num_gen_images:
-            raise RuntimeError(
-                f"{split.name} generated only {generated_images.shape[0]} images; "
-                f"expected {args.num_gen_images}"
-            )
-
-        if real_features is None:
-            real_images = load_real_cifar10_images(dataset_path, real_count)
-            num_real_images = int(real_images.shape[0])
-            print(f"Loaded {num_real_images} real images for FID reference", flush=True)
-            real_features = inception_features(real_images, args.fid_batch_size, args.inception_weights)
-
-        num_generated_images = int(generated_images.shape[0])
-        print(f"Loaded {num_generated_images} generated images for FID[{split.name}]", flush=True)
-        fake_features = inception_features(generated_images, args.fid_batch_size, args.inception_weights)
-        fid = calculate_fid(real_features, fake_features)
+        fid_payload = run_fid_subprocess(dataset_path, generated_dir, split, args, results_dir)
+        fid = float(fid_payload["fid"])
+        num_real_images = int(fid_payload["num_real_images"])
+        num_generated_images = int(fid_payload["num_generated_images"])
         print(f"FID[{split.name}] = {fid:.6f}", flush=True)
 
         row = {
