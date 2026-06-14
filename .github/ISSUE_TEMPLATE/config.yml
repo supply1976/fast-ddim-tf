@@ -1,0 +1,5 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Questions and experiment discussion
+    url: https://github.com/supply1976/fast-ddim-tf/discussions
+    about: Use Discussions for open-ended questions, experiment ideas, and result comparisons.

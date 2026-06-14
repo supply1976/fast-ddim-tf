@@ -1,0 +1,80 @@
+name: Experiment result
+description: Share a reproducible FID/result run for a config or model variant.
+title: "[Result]: "
+labels: ["experiment"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this template to report comparable CIFAR-10 or other diffusion experiment results.
+  - type: input
+    id: config
+    attributes:
+      label: Network/config
+      placeholder: configs/cifar10_32x32_net01.yaml
+    validations:
+      required: true
+  - type: input
+    id: scheduler
+    attributes:
+      label: Scheduler
+      placeholder: cosine
+    validations:
+      required: true
+  - type: input
+    id: prediction
+    attributes:
+      label: Prediction type
+      placeholder: noise
+    validations:
+      required: true
+  - type: input
+    id: loss_weight
+    attributes:
+      label: Loss weighting
+      placeholder: min_snr
+    validations:
+      required: true
+  - type: input
+    id: fid
+    attributes:
+      label: FID
+      placeholder: "16.507735"
+    validations:
+      required: true
+  - type: input
+    id: counts
+    attributes:
+      label: Image counts
+      placeholder: "50,000 generated; 10,000 real reference"
+    validations:
+      required: true
+  - type: input
+    id: checkpoint
+    attributes:
+      label: Checkpoint epoch
+      placeholder: epoch 100 EMA
+    validations:
+      required: true
+  - type: input
+    id: sampling
+    attributes:
+      label: Sampling settings
+      placeholder: "100 reverse steps, DDIM eta 1.0"
+    validations:
+      required: true
+  - type: textarea
+    id: command
+    attributes:
+      label: Reproduction command
+      render: bash
+      placeholder: bash run_cifar10_2x2x2_experiments_01.sh
+    validations:
+      required: true
+  - type: textarea
+    id: notes
+    attributes:
+      label: Notes
+      description: Hardware, train time, observations, or links to sample grids.
+    validations:
+      required: false

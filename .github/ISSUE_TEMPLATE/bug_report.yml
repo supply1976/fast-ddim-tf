@@ -1,0 +1,57 @@
+name: Bug report
+description: Report a reproducible problem in training, generation, data loading, or evaluation.
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting a bug. Please include enough detail to reproduce it locally.
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: What went wrong?
+      placeholder: Training fails when...
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Reproduction command
+      description: Paste the exact command and config path.
+      render: bash
+      placeholder: python scripts/run.py --config configs/... --training
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+      description: What did you expect to happen?
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs or traceback
+      description: Paste the relevant error output.
+      render: text
+    validations:
+      required: false
+  - type: input
+    id: environment
+    attributes:
+      label: Environment
+      description: OS, Python, TensorFlow, CUDA/cuDNN, and GPU if relevant.
+      placeholder: "Ubuntu 22.04, Python 3.12, TensorFlow 2.x, RTX 4090"
+    validations:
+      required: false
+  - type: textarea
+    id: config
+    attributes:
+      label: Relevant config
+      description: Paste or link the relevant YAML entries.
+      render: yaml
+    validations:
+      required: false

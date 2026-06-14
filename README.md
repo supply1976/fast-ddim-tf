@@ -17,9 +17,6 @@ This repository implements a fast DDIM-style diffusion pipeline in TensorFlow. I
 Sample grid from the current best CIFAR-10 split: `net01`, `cosine`,
 `noise`, `min_snr`, FID `16.507735`.
 
-Suggested GitHub topics: `diffusion-models`, `ddim`, `ddpm`, `tensorflow`,
-`keras`, `generative-ai`, `cifar10`, `computer-vision`, `image-generation`.
-
 ## Math notes
 
 The implementation follows the derivation in
