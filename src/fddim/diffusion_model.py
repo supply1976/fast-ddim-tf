@@ -17,7 +17,10 @@ class DiffusionModel(keras.Model):
     2. 'min_snr': Min-SNR weighting strategy
        - Addresses the issue of imbalanced learning across timesteps
        - Applies adaptive weighting based on Signal-to-Noise Ratio (SNR)
-       - Weight formula: w(t) = min(SNR(t), gamma) / SNR(t)
+       - Weight formula depends on prediction type:
+         noise: min(SNR(t), gamma) / SNR(t)
+         image: min(SNR(t), gamma)
+         velocity: min(SNR(t), gamma) / (SNR(t) + 1)
        - Where SNR(t) = alpha_t / (1 - alpha_t)
        - Reference: "Efficient Diffusion Training via Min-SNR Weighting Strategy" (Hang et al., 2023)
        - Benefits: Better sample quality and faster convergence
@@ -100,13 +103,20 @@ class DiffusionModel(keras.Model):
             # Constant weighting (current behavior)
             return tf.ones_like(t, dtype=tf.float32)[:, None, None]
         elif self.loss_weight_type == 'min_snr':
-            # Min-SNR weighting: weight = min(SNR(t), gamma) / SNR(t)
-            # Reference: "Efficient Diffusion Training via Min-SNR Weighting Strategy"
             snr_t = tf.gather(self.snr_values, t)
-            # Apply min operation with gamma
             min_snr = tf.minimum(snr_t, self.min_snr_gamma)
-            # Compute weight
-            weights = min_snr / (snr_t + 1e-8)
+
+            # Min-SNR weights depend on the prediction parameterization.
+            # See Hang et al., "Efficient Diffusion Training via Min-SNR
+            # Weighting Strategy" (arXiv:2303.09556), Sec. 4.2.
+            if self.diff_util.pred_type == 'noise':
+                weights = min_snr / (snr_t + 1e-8)
+            elif self.diff_util.pred_type == 'image':
+                weights = min_snr
+            elif self.diff_util.pred_type == 'velocity':
+                weights = min_snr / (snr_t + 1.0)
+            else:
+                raise ValueError(f"Unknown pred_type: {self.diff_util.pred_type}")
             return weights[:, None, None]
         else:
             raise ValueError(f"Unknown loss_weight_type: {self.loss_weight_type}")
