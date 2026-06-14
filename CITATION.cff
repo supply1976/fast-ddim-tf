@@ -1,0 +1,19 @@
+cff-version: 1.2.0
+message: "If you use fast-ddim-tf, please cite this repository."
+title: "fast-ddim-tf: A derivation-first TensorFlow DDIM implementation"
+authors:
+  - name: "supply1976"
+version: "0.1.0"
+date-released: "2026-06-14"
+url: "https://github.com/supply1976/fast-ddim-tf"
+repository-code: "https://github.com/supply1976/fast-ddim-tf"
+license: "MIT"
+keywords:
+  - diffusion-models
+  - ddim
+  - ddpm
+  - tensorflow
+  - keras
+  - image-generation
+  - cifar10
+abstract: "fast-ddim-tf is a TensorFlow implementation of DDIM with configurable U-Net architecture, diffusion schedules, prediction parameterizations, and reproducible CIFAR-10 FID sweeps."
