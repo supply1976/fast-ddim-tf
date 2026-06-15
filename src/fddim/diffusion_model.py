@@ -110,7 +110,7 @@ class DiffusionModel(keras.Model):
             # See Hang et al., "Efficient Diffusion Training via Min-SNR
             # Weighting Strategy" (arXiv:2303.09556), Sec. 4.2.
             if self.diff_util.pred_type == 'noise':
-                weights = min_snr / (snr_t + 1e-8)
+                weights = tf.math.divide_no_nan(min_snr, snr_t)
             elif self.diff_util.pred_type == 'image':
                 weights = min_snr
             elif self.diff_util.pred_type == 'velocity':

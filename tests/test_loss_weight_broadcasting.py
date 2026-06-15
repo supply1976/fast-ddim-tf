@@ -109,11 +109,17 @@ def test_diffusion_model_min_snr_loss_weights_match_train_step_shape() -> None:
         loss_weight_type="min_snr",
         min_snr_gamma=5.0,
         snr_values=tf.constant(snr_values, dtype=tf.float32),
+        diff_util=SimpleNamespace(pred_type="noise"),
     )
     timesteps = tf.constant([0, 1, 2, 3, 4], dtype=tf.int32)
 
     weights = DiffusionModel._compute_loss_weights(model, timesteps)
 
-    expected = np.minimum(snr_values, 5.0) / (snr_values + 1e-8)
+    expected = np.divide(
+        np.minimum(snr_values, 5.0),
+        snr_values,
+        out=np.zeros_like(snr_values),
+        where=snr_values != 0.0,
+    )
     assert tuple(weights.shape) == (5, 1, 1)
     np.testing.assert_allclose(weights.numpy(), expected[:, None, None], rtol=1e-6)
