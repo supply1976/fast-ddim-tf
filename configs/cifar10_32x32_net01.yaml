@@ -31,8 +31,8 @@ TRAINING:
         SAVE_PERIOD: 10     # save model every SAVE_PERIOD epochs
         BATCH_SIZE: 32      # batch size for training
         GRAD_ACCUM_STEPS: 1 # gradient accumulation steps, effective batch size = BATCH_SIZE * GRAD_ACCUM_STEPS
-        STEPS_PER_EPOCH: 2000    # set this OR TOTAL_GLOBAL_STEPS
-        TOTAL_GLOBAL_STEPS: null # set this OR STEPS_PER_EPOCH, if not set, total global steps = STEPS_PER_EPOCH * EPOCHS / GRAD_ACCUM_STEPS, it determines the total number of optimizer updates (global steps) for training, used for learning rate scheduling and training progress tracking
+        STEPS_PER_EPOCH: null    # set this OR TOTAL_GLOBAL_STEPS
+        TOTAL_GLOBAL_STEPS: 200000 # set this OR STEPS_PER_EPOCH, if not set, total global steps = STEPS_PER_EPOCH * EPOCHS / GRAD_ACCUM_STEPS, it determines the total number of optimizer updates (global steps) for training, used for learning rate scheduling and training progress tracking
         EMA: 0.999    # exponential moving average decay rate for model weights
         LR_TYPE: constant   # constant | warmup_cosine | cosine_decay
         LEARNING_RATE: 1.0e-4
