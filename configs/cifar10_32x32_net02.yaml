@@ -24,23 +24,23 @@ TRAINING:
     OUTPUT_DIR: ./training_outputs # output directory for training logs and model checkpoints
     LOAD_PRETRAINED: null      # path to .h5, or null
     LOSS_FN: MSE               # MSE | MAE | BCE
-    LOSS_WEIGHT_TYPE: min_snr  # constant | min_snr
+    LOSS_WEIGHT_TYPE: constant #min_snr  # constant | min_snr
     MIN_SNR_GAMMA: 5.0
     HYPER_PARAMETERS:
         EPOCHS: 100         # total epochs to train
         SAVE_PERIOD: 10     # save model every SAVE_PERIOD epochs
         BATCH_SIZE: 128      # batch size for training
         GRAD_ACCUM_STEPS: 1 # gradient accumulation steps, effective batch size = BATCH_SIZE * GRAD_ACCUM_STEPS
-        STEPS_PER_EPOCH: 2000    # set this OR TOTAL_GLOBAL_STEPS
-        TOTAL_GLOBAL_STEPS: null # set this OR STEPS_PER_EPOCH, if not set, total global steps = STEPS_PER_EPOCH * EPOCHS / GRAD_ACCUM_STEPS, it determines the total number of optimizer updates (global steps) for training, used for learning rate scheduling and training progress tracking
+        STEPS_PER_EPOCH: null    # set this OR TOTAL_GLOBAL_STEPS
+        TOTAL_GLOBAL_STEPS: 200000 # set this OR STEPS_PER_EPOCH, if not set, total global steps = STEPS_PER_EPOCH * EPOCHS / GRAD_ACCUM_STEPS, it determines the total number of optimizer updates (global steps) for training, used for learning rate scheduling and training progress tracking
         EMA: 0.999    # exponential moving average decay rate for model weights
         LR_TYPE: constant   # constant | warmup_cosine | cosine_decay
         LEARNING_RATE: 1.0e-4
         WARMUP_STEPS: null # if lr_type is warmup_cosine, the number of warmup steps. If null, it defaults to total_global_steps // 20
     INLINE_GEN:
         ENABLE: true  # whether to enable inline image generation during training for monitoring progress
-        NUMS: 20      # number of images to generate for each inline generation
-        PERIOD: 10    # generate images every PERIOD epochs
+        NUMS: 50      # number of images to generate for each inline generation
+        PERIOD: 1    # generate images every PERIOD epochs
         REVERSE_STEPS: 100   # number of reverse diffusion steps for inline generation, typically smaller than the steps used for final generation to save time
 
 NETWORK:
@@ -50,10 +50,10 @@ NETWORK:
     NUM_RES_BLOCKS: 2
     NORM_GROUPS: 32
     BASE_CHANNELS: 128
-    CHANNEL_MULTIPLIER: [1, 2, 2, 4]
-    HAS_ATTENTION: [false, false, true, true]
+    CHANNEL_MULTIPLIER: [1, 2, 2, 2]
+    HAS_ATTENTION: [false, true, false, false]
     MID_ATTENTION: true
-    NUM_HEADS: 4
+    NUM_HEADS: 1
     EMBEDDING_TYPE: positional # positional | fourier
     EMBEDDING_DIM: null
     TIME_EMB_DIM: null

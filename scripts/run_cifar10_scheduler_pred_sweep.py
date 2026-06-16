@@ -85,6 +85,7 @@ def update_config_for_split(
     base: dict[str, Any],
     split: Split,
     train_batch_size: int | None,
+    global_steps: int | None,
     output_root: Path,
     num_gen_images: int,
     gen_batch_size: int | None,
@@ -101,8 +102,10 @@ def update_config_for_split(
     if disable_inline_gen:
         cfg["TRAINING"].setdefault("INLINE_GEN", {})["ENABLE"] = False
     if train_batch_size is not None:
+        # overwrite the cfg setting value
         cfg["TRAINING"]["HYPER_PARAMETERS"]["BATCH_SIZE"] = train_batch_size
-
+    if global_steps is not None:
+        cfg["TRAINING"]["HYPER_PARAMETERS"]["TOTAL_GLOBAL_STEPS"] = global_steps
     imgen = cfg["IMAGE_GENERATION"]
     imgen["MODEL_PATH"] = ""
     imgen["GEN_TASK"] = "random"
@@ -272,6 +275,10 @@ def inception_features(
 ) -> np.ndarray:
     import tensorflow as tf
     from tensorflow.keras.applications.inception_v3 import InceptionV3, preprocess_input # pyright: ignore[reportMissingImports]
+    gpus = tf.config.list_physical_devices("GPU")
+    if gpus:
+        [tf.config.experimental.set_memory_growth(gpu, True) for gpu in gpus]
+
 
     weights: str | None = inception_weights if inception_weights else "imagenet"
     model = InceptionV3(include_top=False, pooling="avg", weights=weights, input_shape=(299, 299, 3))
@@ -314,7 +321,7 @@ def compute_fid_only(args: argparse.Namespace) -> None:
     if args.fid_output is None:
         raise ValueError("--fid-output is required with --compute-fid-only")
     if args.fid_device == "cpu":
-        os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
+        os.environ["CUDA_VISIBLE_DEVICES"] = ""
 
     dataset_path = args.real_dataset_path.resolve()
     generated_dir = args.generated_dir.resolve()
@@ -373,9 +380,9 @@ def write_results_csv(path: Path, rows: list[dict[str, Any]]) -> None:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run CIFAR-10 scheduler/prediction/loss-weight sweep.")
-    parser.add_argument("--base-config", type=Path, default=Path("configs/cifar10_32x32.yaml"))
-    parser.add_argument("--work-dir", type=Path, default=Path("experiments/cifar10_scheduler_pred_sweep"))
-    parser.add_argument("--output-root", type=Path, default=Path("training_outputs/cifar10_scheduler_pred_sweep"))
+    parser.add_argument("--base-config", type=Path, default=Path("configs/cifar10_32x32_net02.yaml"))
+    parser.add_argument("--work-dir", type=Path, default=Path("experiments/cifar10_scheduler_pred_losswt_sweep"))
+    parser.add_argument("--output-root", type=Path, default=Path("training_outputs/cifar10_scheduler_pred_losswt_sweep"))
     parser.add_argument("--num-gen-images", type=int, default=50000)
     parser.add_argument(
         "--train-batch-size",
@@ -383,12 +390,18 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Override TRAINING.HYPER_PARAMETERS.BATCH_SIZE. Defaults to the base config value.",
     )
-    parser.add_argument("--gen-batch-size", type=int, default=100)
+    parser.add_argument(
+        "--global-steps",
+        type=int,
+        default=None,
+        help="Override TRAINING.HYPER_PARAMETERS.TOTAL_GLOBAL_STEPS. Defaults to the base config value.",
+    )
+    parser.add_argument("--gen-batch-size", type=int, default=500)
     parser.add_argument("--fid-batch-size", type=int, default=64)
     parser.add_argument(
         "--fid-device",
         choices=["cpu", "gpu"],
-        default="cpu",
+        default="gpu",
         help="Device used by the FID subprocess. CPU avoids keeping GPU memory in the parent sweep.",
     )
     parser.add_argument("--reverse-steps", type=int, default=None)
@@ -402,6 +415,7 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Keep inline generation enabled during training. Disabled by default for sweep speed.",
     )
+    parser.add_argument("--jobname", type=str, default=None)
     parser.add_argument("--compute-fid-only", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--real-dataset-path", type=Path, default=None, help=argparse.SUPPRESS)
     parser.add_argument("--generated-dir", type=Path, default=None, help=argparse.SUPPRESS)
@@ -418,7 +432,9 @@ def main() -> None:
     base_config_path = (ROOT / args.base_config).resolve() if not args.base_config.is_absolute() else args.base_config
     work_dir = (ROOT / args.work_dir).resolve() if not args.work_dir.is_absolute() else args.work_dir
     output_root = (ROOT / args.output_root).resolve() if not args.output_root.is_absolute() else args.output_root
-
+    if args.jobname:
+        output_root = output_root / args.jobname
+        work_dir = work_dir / args.jobname
     base_cfg = load_yaml(base_config_path)
     config_dir = work_dir / "configs"
     results_dir = work_dir / "results"
@@ -436,6 +452,7 @@ def main() -> None:
             base_cfg,
             split,
             args.train_batch_size,
+            args.global_steps,
             output_root,
             args.num_gen_images,
             args.gen_batch_size,

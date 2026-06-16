@@ -1,1 +1,0 @@
-python ./scripts/run_cifar10_scheduler_pred_sweep.py --base-config configs/cifar10_32x32_net01.yaml --work-dir ./experiments/cifar10_scheduler_pred_losswt_sweep/01__net01_batch32 --output-root ./training_outputs/cifar10_scheduler_pred_losswt_sweep/01__net01_batch32 --train-batch-size 32 --gen-batch-size 512
