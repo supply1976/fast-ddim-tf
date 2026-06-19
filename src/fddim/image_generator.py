@@ -237,7 +237,7 @@ class ImageGenerator:
     def sample_images(self,
                       reverse_steps=100, 
                       num_images=20, 
-                      clip_denoise=False,
+                      clip_denoise=True,
                       use_ema_model=True, 
                       labels=None,
                       ):
@@ -294,7 +294,7 @@ class ImageGenerator:
                                  savedir='./',
                                  save_intermediate=False,
                                  save_format='png',
-                                 clip_denoise=False, 
+                                 clip_denoise=True, 
                                  base_images=None,
                                  labels=None,
                                  inpaint_mask=None,

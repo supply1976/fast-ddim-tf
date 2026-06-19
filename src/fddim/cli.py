@@ -286,7 +286,7 @@ class ImageGenConfig:
     space_inpaint_bbox: Optional[Tuple[int, int, int, int]] = None
     bbox_to_inpaint: bool = True
     external_input: Optional[str] = None
-    clip_denoise: bool = False
+    clip_denoise: bool = True
     self_guide_scale: float = 0.0
     sdedit_strength: float = 0.5  # for img2img task only, strength of diffusion (0-1)
     overlap_dir: Optional[str] = None  # for overlap_inpaint task only, options: 'north', 'east', 'south', 'west'
@@ -313,7 +313,7 @@ class ImageGenConfig:
         space_inpaint_bbox: Optional[Tuple[int, int, int, int]] = None,
         bbox_to_inpaint: bool = True,
         external_input: Optional[str] = None,
-        clip_denoise: bool = False,
+        clip_denoise: bool = True,
         self_guide_scale: float = 0.0,
         sdedit_strength: float = 0.5,
         overlap_dir: Optional[str] = None,
@@ -480,7 +480,7 @@ class ConfigManager:
             target_image_size = imgen_dict.get('TARGET_IMAGE_SIZE'),
             self_guide_scale  = imgen_dict.get('_SELF_GUIDE_SCALE', 0.0),
             sdedit_strength   = imgen_dict.get('_SDEDIT_STRENGTH', 0.5),
-            clip_denoise      = imgen_dict.get('CLIP_DENOISE', False),
+            clip_denoise      = imgen_dict.get('CLIP_DENOISE', True),
             save_dir            = imgen_outputs_dict.get('SAVE_DIR'),
             save_intermediate   = imgen_outputs_dict.get('SAVE_INTERMEDIATE', False),
             save_format         = imgen_outputs_dict.get('SAVE_FORMAT', 'png'),
@@ -1226,7 +1226,7 @@ IMAGE_GENERATION:
     TARGET_IMAGE_SIZE: null    # int or [H, W]
     _SELF_GUIDE_SCALE: 0.0
     _SDEDIT_STRENGTH: 0.5
-    CLIP_DENOISE: false       # inference only; clip predicted x0 during reverse sampling
+    CLIP_DENOISE: true       # inference only; clip predicted x0 during reverse sampling
     OUTPUT_OPTIONS:
         SAVE_DIR: null
         SAVE_INTERMEDIATE: false
