@@ -300,7 +300,6 @@ class InlineImageGenerationCallback(keras.callbacks.Callback):
                 images = self.model.sample_images(
                     reverse_steps=self.reverse_steps,
                     num_images=self.num_images,
-                    clip_denoise=True,
                     use_ema_model=True,
                     labels=self.labels,
                 )

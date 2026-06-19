@@ -78,7 +78,7 @@ IMAGE_GENERATION:
     TARGET_IMAGE_SIZE: 32    # int or [H, W]
     _SELF_GUIDE_SCALE: 0.0
     _SDEDIT_STRENGTH: 0.5
-    CLIP_DENOISE: true
+    CLIP_DENOISE: false       # inference only; clip predicted x0 during reverse sampling
     OUTPUT_OPTIONS:
         SAVE_DIR: null
         SAVE_INTERMEDIATE: false
@@ -92,4 +92,3 @@ IMAGE_GENERATION:
         EXTERNAL_INPUT: null     # path to .npz/.png/.jpg/.jpeg
         OVERLAP_DIR: null        # north | east | south | west
         OVERLAP_SIZE: null
-

@@ -25,7 +25,7 @@ class DiffusionUtility:
     """
 
     def __init__(self, b0=0.1, b1=20.0, scheduler='linear', timesteps=1000,
-                 pred_type='velocity', reverse_steps=1000, ddim_eta=1.0, clip_denoise=True):
+                 pred_type='velocity', reverse_steps=1000, ddim_eta=1.0, clip_denoise=False):
         self._validate_params(timesteps, reverse_steps, pred_type)
         self._set_params(b0, b1, scheduler, timesteps, pred_type, reverse_steps, ddim_eta)
         self.time_samples = np.linspace(0, 1, timesteps + 1, dtype=np.float64)
@@ -165,6 +165,9 @@ class DiffusionUtility:
             t: Timestep tensor
             pred_type: Type of prediction ('noise', 'image', 'velocity')
             y_pred: Model prediction
+            clip_denoise: If True, clip predicted clean image to [-1, 1]
+                and recompute the implied noise so both components remain
+                consistent with x_t. This should be used only for inference.
         
         Returns:
             tuple: (pred_noise, pred_image)
@@ -190,11 +193,12 @@ class DiffusionUtility:
         else:
             raise ValueError(f"Invalid pred_type: {pred_type}")
 
-        # Optional clipping: keep (pred_image, pred_noise) consistent with x_t
+        # Optional inference-time clipping: keep (pred_image, pred_noise)
+        # consistent with x_t after projecting pred_image to the data range.
         if clip_denoise:
             pred_image = tf.clip_by_value(pred_image, self.CLIP_MIN, self.CLIP_MAX)
             pred_noise = (x_t - mu_t * pred_image) / (sigma_t + 1.0e-8)
-        
+
         return pred_noise, pred_image
 
     def p_sample_ddim(self, x_0, pred_noise, t, s):

@@ -55,14 +55,14 @@ class Split:
 
 
 SPLITS = [
-    Split("cosine", "velocity", "min_snr"),
-    Split("cosine", "velocity", "constant"),
-    Split("cosine", "noise", "min_snr"),
-    Split("cosine", "noise", "constant"),
-    Split("linear", "velocity", "min_snr"),
-    Split("linear", "velocity", "constant"),
-    Split("linear", "noise", "min_snr"),
     Split("linear", "noise", "constant"),
+    Split("cosine", "noise", "constant"),
+    Split("linear", "velocity", "constant"),
+    Split("cosine", "velocity", "constant"),
+    Split("linear", "noise", "min_snr"),
+    Split("cosine", "noise", "min_snr"),
+    Split("linear", "velocity", "min_snr"),
+    Split("cosine", "velocity", "min_snr"),
 ]
 
 

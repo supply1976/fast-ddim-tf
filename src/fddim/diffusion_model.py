@@ -148,6 +148,22 @@ class DiffusionModel(keras.Model):
         self._grad_accum_counter.assign(0)
         return tf.constant(0)
 
+    def _compute_training_losses(self, images, noises, images_t, t, v_t, y_pred):
+        pred_noise, pred_image = self.diff_util.get_pred_components(
+            images_t, t, self.diff_util.pred_type, y_pred, clip_denoise=False,
+        )
+        if self.diff_util.pred_type == 'noise':
+            loss = self.loss(noises, y_pred)
+        elif self.diff_util.pred_type == 'image':
+            loss = self.loss(images, y_pred)
+        elif self.diff_util.pred_type == 'velocity':
+            loss = self.loss(v_t, y_pred)
+        else:
+            raise ValueError("pred_type must be one of [noise, image, velocity]")
+        noise_loss = self.loss(noises, pred_noise)
+        image_loss = self.loss(images, pred_image)
+        return loss, noise_loss, image_loss
+
     @tf.function
     def train_step(self, data):
         if isinstance(data, (list, tuple)):
@@ -167,20 +183,9 @@ class DiffusionModel(keras.Model):
                 labels = tf.cond(null_mask, lambda: tf.zeros_like(labels), lambda: labels)
                 inputs.append(labels)
             y_pred = self.network(inputs, training=True)
-            pred_noise, pred_image = self.diff_util.get_pred_components(
-                images_t, t, self.diff_util.pred_type, y_pred, clip_denoise=True,
+            loss, noise_loss, image_loss = self._compute_training_losses(
+                images, noises, images_t, t, v_t, y_pred
             )
-            # Compute per-sample loss
-            noise_loss = self.loss(noises, pred_noise)
-            image_loss = self.loss(images, pred_image)
-            if self.diff_util.pred_type == 'noise':
-                loss = noise_loss
-            elif self.diff_util.pred_type == 'image':
-                loss = image_loss
-            elif self.diff_util.pred_type == 'velocity':
-                loss = self.loss(v_t, y_pred)
-            else:
-                raise ValueError("pred_type must be one of [noise, image, velocity]")
             
             # Apply loss weights based on timestep
             loss_weights = self._compute_loss_weights(t)
@@ -233,19 +238,9 @@ class DiffusionModel(keras.Model):
         if labels is not None:
             inputs.append(labels)
         y_pred = self.ema_network(inputs, training=False)
-        pred_noise, pred_image = self.diff_util.get_pred_components(
-            images_t, t, self.diff_util.pred_type, y_pred, clip_denoise=True,
+        loss, noise_loss, image_loss = self._compute_training_losses(
+            images, noises, images_t, t, v_t, y_pred
         )
-        noise_loss = self.loss(noises, pred_noise)
-        image_loss = self.loss(images, pred_image)
-        if self.diff_util.pred_type == 'noise':
-            loss = noise_loss
-        elif self.diff_util.pred_type == 'image':
-            loss = image_loss
-        elif self.diff_util.pred_type == 'velocity':
-            loss = self.loss(v_t, y_pred)
-        else:
-            loss = None
         
         # Reduce all losses to scalars for tracking
         loss_scalar = tf.reduce_mean(loss)

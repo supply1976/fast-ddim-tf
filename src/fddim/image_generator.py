@@ -237,7 +237,7 @@ class ImageGenerator:
     def sample_images(self,
                       reverse_steps=100, 
                       num_images=20, 
-                      clip_denoise=True,
+                      clip_denoise=False,
                       use_ema_model=True, 
                       labels=None,
                       ):
@@ -250,7 +250,8 @@ class ImageGenerator:
         Args:
             reverse_steps: Steps for reverse diffusion
             num_images: Number of images to generate
-            clip_denoise: Whether to clip denoising predictions
+            clip_denoise: If True, clip predicted x0 during reverse sampling
+                and recompute the implied noise. Defaults to False.
             gen_inputs: Optional initial samples (if None, uses random noise)
             use_ema_model: Whether to use EMA network for inference
             labels: Optional class labels for conditional generation
@@ -293,7 +294,7 @@ class ImageGenerator:
                                  savedir='./',
                                  save_intermediate=False,
                                  save_format='png',
-                                 clip_denoise=True, 
+                                 clip_denoise=False, 
                                  base_images=None,
                                  labels=None,
                                  inpaint_mask=None,
@@ -321,7 +322,8 @@ class ImageGenerator:
             reverse_steps: Number of reverse steps for diffusion
             savedir: Directory to save generated images
             save_intermediate: Whether to save denoised images at intermediate timesteps
-            clip_denoise: Whether to clip denoising predictions
+            clip_denoise: If True, clip predicted x0 during reverse sampling
+                and recompute the implied noise. Defaults to False.
             base_images: Optional base images for inpainting
             labels: Optional class labels
             inpaint_mask: Optional mask for inpainting

@@ -286,7 +286,7 @@ class ImageGenConfig:
     space_inpaint_bbox: Optional[Tuple[int, int, int, int]] = None
     bbox_to_inpaint: bool = True
     external_input: Optional[str] = None
-    clip_denoise: bool = True
+    clip_denoise: bool = False
     self_guide_scale: float = 0.0
     sdedit_strength: float = 0.5  # for img2img task only, strength of diffusion (0-1)
     overlap_dir: Optional[str] = None  # for overlap_inpaint task only, options: 'north', 'east', 'south', 'west'
@@ -313,7 +313,7 @@ class ImageGenConfig:
         space_inpaint_bbox: Optional[Tuple[int, int, int, int]] = None,
         bbox_to_inpaint: bool = True,
         external_input: Optional[str] = None,
-        clip_denoise: bool = True,
+        clip_denoise: bool = False,
         self_guide_scale: float = 0.0,
         sdedit_strength: float = 0.5,
         overlap_dir: Optional[str] = None,
@@ -480,7 +480,7 @@ class ConfigManager:
             target_image_size = imgen_dict.get('TARGET_IMAGE_SIZE'),
             self_guide_scale  = imgen_dict.get('_SELF_GUIDE_SCALE', 0.0),
             sdedit_strength   = imgen_dict.get('_SDEDIT_STRENGTH', 0.5),
-            clip_denoise      = imgen_dict.get('CLIP_DENOISE', True),
+            clip_denoise      = imgen_dict.get('CLIP_DENOISE', False),
             save_dir            = imgen_outputs_dict.get('SAVE_DIR'),
             save_intermediate   = imgen_outputs_dict.get('SAVE_INTERMEDIATE', False),
             save_format         = imgen_outputs_dict.get('SAVE_FORMAT', 'png'),
@@ -538,7 +538,7 @@ class ModelBuilder:
     @staticmethod
     def create_diffusion_utility(diffusion_scheduler_config: DiffusionSchedulerConfig, 
                                  reverse_steps=None, ddim_eta: float = 1.0, 
-                                 clip_denoise: bool = True) -> DiffusionUtility:
+                                 clip_denoise: bool = False) -> DiffusionUtility:
         """Create diffusion utility with common parameters."""
         if reverse_steps is None:
             reverse_steps = diffusion_scheduler_config.timesteps
@@ -838,7 +838,7 @@ class DiffusionTrainer:
         # Create diffusion utilities and model
         diff_util_train = ModelBuilder.create_diffusion_utility(
             self.diffusion_scheduler_config, 
-            clip_denoise=True,
+            clip_denoise=False,
         )
         
         dm = DiffusionModel(
@@ -865,7 +865,7 @@ class DiffusionTrainer:
         # Setup training components
         lr_schedule = ModelBuilder.create_lr_schedule(self.training_config)
         loss_fn = ModelBuilder.create_loss_function(self.training_config.loss_fn)
-        optimizer = keras.optimizers.AdamW(learning_rate=lr_schedule)
+        optimizer = keras.optimizers.AdamW(learning_rate=lr_schedule, weight_decay=0.0)
         
         # Setup callbacks
         callbacks = [
@@ -1226,7 +1226,7 @@ IMAGE_GENERATION:
     TARGET_IMAGE_SIZE: null    # int or [H, W]
     _SELF_GUIDE_SCALE: 0.0
     _SDEDIT_STRENGTH: 0.5
-    CLIP_DENOISE: true
+    CLIP_DENOISE: false       # inference only; clip predicted x0 during reverse sampling
     OUTPUT_OPTIONS:
         SAVE_DIR: null
         SAVE_INTERMEDIATE: false
