@@ -131,18 +131,19 @@ The following results:
 - 50,000 generated images, and 10,000 CIFAR-10 test images for the real FID reference. 
 - Lower FID is better.
 
-| Scheduler | Prediction | Loss weight | net01 batch 32 | net01 batch 128 |
-| ---       | ---        | ---         | ---:  | ---:  |
-| cosine | noise | constant | 18.707849 | 15.399408 |
-| cosine | noise | min_snr | 17.946105 | 17.402848 |
-| cosine | velocity | constant | 23.722624 | 17.812076 |
-| cosine | velocity | min_snr | 18.385430 | 18.442803 |
-| linear | noise | constant | 25.468493 | 19.337241 |
-| linear | noise | min_snr | 24.749511 | 21.146388 |
-| linear | velocity | min_snr | 25.690931 | 22.027908 |
-| linear | velocity | constant | 34.487434 | 25.917514 |
+| Scheduler | Prediction | Loss weight | net01 batch 128 (old) | net01 batch 32 |
+| ---       | ---        | ---         | ---:  | ---: |
+| cosine | noise | constant | 15.399408 | 19.006805 |
+| cosine | noise | min_snr | 17.402848 | 17.636943 |
+| cosine | velocity | constant | 17.812076 | 24.998476 |
+| cosine | velocity | min_snr | 18.442803 | 17.980634 |
+| linear | noise | constant | 19.337241 | 25.263250 |
+| linear | noise | min_snr | 21.146388 | 23.677097 |
+| linear | velocity | min_snr | 22.027908 | 25.298657 |
+| linear | velocity | constant | 25.917514 | 33.871343 |
 
-Best completed `net01` split in the latest run: `cosine_noise_constant` with FID `15.399408`.
+Best completed old `net01` batch-128 split: `cosine_noise_constant` with FID `15.399408`.
+Best completed latest `net01` batch-32 split: `cosine_noise_min_snr` with FID `17.636943`.
 
 ## CIFAR-10 dataset helper
 
