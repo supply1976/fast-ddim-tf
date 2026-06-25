@@ -25,7 +25,7 @@ class DiffusionUtility:
     """
 
     def __init__(self, b0=0.1, b1=20.0, scheduler='linear', timesteps=1000,
-                 pred_type='velocity', reverse_steps=1000, ddim_eta=1.0, clip_denoise=False):
+                 pred_type='velocity', reverse_steps=1000, ddim_eta=0.0, clip_denoise=False):
         self._validate_params(timesteps, reverse_steps, pred_type)
         self._set_params(b0, b1, scheduler, timesteps, pred_type, reverse_steps, ddim_eta)
         self.time_samples = np.linspace(0, 1, timesteps + 1, dtype=np.float64)

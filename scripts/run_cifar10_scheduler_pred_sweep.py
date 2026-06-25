@@ -90,6 +90,7 @@ def update_config_for_split(
     num_gen_images: int,
     gen_batch_size: int | None,
     reverse_steps: int | None,
+    ddim_eta: float | None,
     save_format: str,
     disable_inline_gen: bool,
 ) -> dict[str, Any]:
@@ -113,6 +114,8 @@ def update_config_for_split(
     imgen["BATCH_SIZE"] = gen_batch_size
     if reverse_steps is not None:
         imgen["REVERSE_STEPS"] = int(reverse_steps)
+    if ddim_eta is not None:
+        imgen["DDIM_ETA"] = float(ddim_eta)
     imgen["RANDOM_SEED"] = None
     imgen["TARGET_IMAGE_SIZE"] = cfg["NETWORK"]["IMAGE_SIZE"]
     imgen["OUTPUT_OPTIONS"]["SAVE_DIR"] = str(output_root / split.name / "generated")
@@ -353,6 +356,7 @@ def compute_fid_only(args: argparse.Namespace) -> None:
         "fid": fid,
         "num_real_images": num_real_images,
         "num_generated_images": num_generated_images,
+        "ddim_eta": args.ddim_eta,
     }
     with fid_output.open("w") as f:
         json.dump(payload, f, indent=2)
@@ -366,6 +370,7 @@ def write_results_csv(path: Path, rows: list[dict[str, Any]]) -> None:
         "scheduler",
         "pred_type",
         "loss_weight_type",
+        "ddim_eta",
         "fid",
         "num_real_images",
         "num_generated_images",
@@ -384,29 +389,20 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--work-dir", type=Path, default=Path("experiments/cifar10_scheduler_pred_losswt_sweep"))
     parser.add_argument("--output-root", type=Path, default=Path("training_outputs/cifar10_scheduler_pred_losswt_sweep"))
     parser.add_argument("--num-gen-images", type=int, default=50000)
-    parser.add_argument(
-        "--train-batch-size",
-        type=int,
-        default=None,
-        help="Override TRAINING.HYPER_PARAMETERS.BATCH_SIZE. Defaults to the base config value.",
-    )
-    parser.add_argument(
-        "--global-steps",
-        type=int,
-        default=None,
-        help="Override TRAINING.HYPER_PARAMETERS.TOTAL_GLOBAL_STEPS. Defaults to the base config value.",
-    )
+    parser.add_argument("--train-batch-size", type=int, default=None, 
+                        help="Override TRAINING.HYPER_PARAMETERS.BATCH_SIZE. Defaults to the base config value.")
+    parser.add_argument("--global-steps", type=int, default=None, 
+                        help="Override TRAINING.HYPER_PARAMETERS.TOTAL_GLOBAL_STEPS. Defaults to the base config value.")
     parser.add_argument("--gen-batch-size", type=int, default=500)
     parser.add_argument("--fid-batch-size", type=int, default=64)
-    parser.add_argument(
-        "--fid-device",
-        choices=["cpu", "gpu"],
-        default="gpu",
-        help="Device used by the FID subprocess. CPU avoids keeping GPU memory in the parent sweep.",
-    )
+    parser.add_argument("--fid-device", choices=["cpu", "gpu"], default="gpu", 
+                        help="Device used by the FID subprocess. CPU avoids keeping GPU memory in the parent sweep.")
     parser.add_argument("--reverse-steps", type=int, default=None)
+    parser.add_argument("--ddim-eta", type=float, default=None, 
+                        help="Override IMAGE_GENERATION.DDIM_ETA. Defaults to the base config value.")
     parser.add_argument("--save-format", choices=["png", "npz"], default="png")
-    parser.add_argument("--inception-weights", type=str, default=None, help="Path to local InceptionV3 no-top weights. Defaults to Keras 'imagenet'.")
+    parser.add_argument("--inception-weights", type=str, default=None, 
+                        help="Path to local InceptionV3 no-top weights. Defaults to Keras 'imagenet'.")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--skip-training", action="store_true", help="Reuse existing latest checkpoints.")
     parser.add_argument("--skip-generation", action="store_true", help="Reuse existing generated image files.")
@@ -457,6 +453,7 @@ def main() -> None:
             args.num_gen_images,
             args.gen_batch_size,
             args.reverse_steps,
+            args.ddim_eta,
             args.save_format,
             not args.enable_inline_gen,
         )

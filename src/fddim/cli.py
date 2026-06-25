@@ -270,7 +270,7 @@ class ImageGenConfig:
     num_gen_images: int = 20
     batch_size: Optional[int] = None
     reverse_steps: int = 100
-    ddim_eta: float = 1.0
+    ddim_eta: float = 0.0
     random_seed: Optional[int] = None
     target_image_size: Union[int, Tuple[int, int]] = None # int or (int, int)
     canvas_shape: Optional[Tuple[int, int]] = None  # for canvas_gen task only, (height, width)
@@ -299,7 +299,7 @@ class ImageGenConfig:
         num_gen_images: int = 20,
         batch_size: Optional[int] = None,
         reverse_steps: int = 100,
-        ddim_eta: float = 1.0,
+        ddim_eta: float = 0.0,
         random_seed: Optional[int] = None,
         target_image_size: Union[int, Tuple[int, int]] = None,
         canvas_shape: Optional[Tuple[int, int]] = None,
@@ -475,7 +475,7 @@ class ConfigManager:
             canvas_shape      = imgen_dict.get('CANVAS_SHAPE'),
             canvas_patch_size = imgen_dict.get('CANVAS_PATCH_SIZE'),
             canvas_stride     = imgen_dict.get('CANVAS_STRIDE'),
-            ddim_eta          = imgen_dict.get('DDIM_ETA', 1.0),
+            ddim_eta          = imgen_dict.get('DDIM_ETA', 0.0),
             random_seed       = imgen_dict.get('RANDOM_SEED'),
             target_image_size = imgen_dict.get('TARGET_IMAGE_SIZE'),
             self_guide_scale  = imgen_dict.get('_SELF_GUIDE_SCALE', 0.0),
@@ -537,7 +537,7 @@ class ModelBuilder:
     
     @staticmethod
     def create_diffusion_utility(diffusion_scheduler_config: DiffusionSchedulerConfig, 
-                                 reverse_steps=None, ddim_eta: float = 1.0, 
+                                 reverse_steps=None, ddim_eta: float = 0.0, 
                                  clip_denoise: bool = False) -> DiffusionUtility:
         """Create diffusion utility with common parameters."""
         if reverse_steps is None:
@@ -1164,7 +1164,7 @@ DATASET:
         VALIDATION_SPLIT: null   # float in (0, 1), or null
 
 DIFFUSION_SCHEDULER:
-    SCHEDULER: linear          # linear | cosine | my_cosine | my_cos6
+    SCHEDULER: cosine          # linear | cosine | my_cosine | my_cos6
     TIMESTEPS: 1000
     PRED_TYPE: velocity        # velocity | image | noise
 
@@ -1172,23 +1172,23 @@ TRAINING:
     OUTPUT_DIR: ./training_outputs # output directory for training logs and model checkpoints
     LOAD_PRETRAINED: null      # path to .h5, or null
     LOSS_FN: MSE               # MSE | MAE | BCE
-    LOSS_WEIGHT_TYPE: min_snr  # constant | min_snr
+    LOSS_WEIGHT_TYPE: constant  # constant | min_snr
     MIN_SNR_GAMMA: 5.0
     HYPER_PARAMETERS:
         EPOCHS: 100         # total epochs to train
         SAVE_PERIOD: 10     # save model every SAVE_PERIOD epochs
-        BATCH_SIZE: 16      # batch size for training
+        BATCH_SIZE: 128      # batch size for training
         GRAD_ACCUM_STEPS: 1 # gradient accumulation steps, effective batch size = BATCH_SIZE * GRAD_ACCUM_STEPS
-        STEPS_PER_EPOCH: 1000    # set this OR TOTAL_GLOBAL_STEPS
-        TOTAL_GLOBAL_STEPS: null # set this OR STEPS_PER_EPOCH, if not set, total global steps = STEPS_PER_EPOCH * EPOCHS / GRAD_ACCUM_STEPS, it determines the total number of optimizer updates (global steps) for training, used for learning rate scheduling and training progress tracking
-        EMA: 0.999    # exponential moving average decay rate for model weights
+        STEPS_PER_EPOCH: null    # set this OR TOTAL_GLOBAL_STEPS
+        TOTAL_GLOBAL_STEPS: 200000 # set this OR STEPS_PER_EPOCH, if not set, total global steps = STEPS_PER_EPOCH * EPOCHS / GRAD_ACCUM_STEPS, it determines the total number of optimizer updates (global steps) for training, used for learning rate scheduling and training progress tracking
+        EMA: 0.9999    # exponential moving average decay rate for model weights
         LR_TYPE: constant   # constant | warmup_cosine | cosine_decay
-        LEARNING_RATE: 1.0e-4
+        LEARNING_RATE: 2.0e-4
         WARMUP_STEPS: null # if lr_type is warmup_cosine, the number of warmup steps. If null, it defaults to total_global_steps // 20
     INLINE_GEN:
         ENABLE: true  # whether to enable inline image generation during training for monitoring progress
         NUMS: 20      # number of images to generate for each inline generation
-        PERIOD: 10    # generate images every PERIOD epochs
+        PERIOD: 2    # generate images every PERIOD epochs
         REVERSE_STEPS: 100   # number of reverse diffusion steps for inline generation, typically smaller than the steps used for final generation to save time
 
 NETWORK:
@@ -1221,7 +1221,7 @@ IMAGE_GENERATION:
     CANVAS_SHAPE: null         # [H, W] for canvas_gen
     CANVAS_PATCH_SIZE: null
     CANVAS_STRIDE: null
-    DDIM_ETA: 1.0
+    DDIM_ETA: 0.0
     RANDOM_SEED: null
     TARGET_IMAGE_SIZE: null    # int or [H, W]
     _SELF_GUIDE_SCALE: 0.0
