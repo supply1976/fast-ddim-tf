@@ -43,8 +43,8 @@ class DiffusionUtility:
             raise TypeError("reverse_steps must be an integer")
         if reverse_steps < 1:
             raise ValueError("reverse_steps must be >= 1")
-        if timesteps % reverse_steps != 0:
-            raise ValueError("timesteps must be divisible by reverse_steps")
+        if reverse_steps > timesteps:
+            raise ValueError("reverse_steps must be <= timesteps")
         if pred_type not in ['noise', 'image', 'velocity']:
             raise ValueError(f"pred_type must be one of ['noise', 'image', 'velocity'], got {pred_type}")
     
@@ -156,6 +156,34 @@ class DiffusionUtility:
         v_t = mu_t * noise - sigma_t * x_0
         return (x_t, v_t)
 
+    def make_reverse_time_pairs(self, t_start=None, reverse_steps=None):
+        """Return integer reverse timestep pairs without requiring divisibility.
+
+        The returned arrays have length ``reverse_steps`` and represent
+        transitions ``t_values[i] -> s_values[i]`` with ``t > s``.
+        """
+        if t_start is None:
+            t_start = self.timesteps
+        if reverse_steps is None:
+            reverse_steps = self.reverse_steps
+        t_start = int(t_start)
+        reverse_steps = int(reverse_steps)
+        if t_start < 1 or t_start > self.timesteps:
+            raise ValueError(f"t_start must be in range [1, {self.timesteps}]")
+        if reverse_steps < 1:
+            raise ValueError("reverse_steps must be >= 1")
+        if reverse_steps > t_start:
+            raise ValueError("reverse_steps must be <= t_start")
+
+        time_points = np.rint(
+            np.linspace(t_start, 0, reverse_steps + 1, dtype=np.float64)
+        ).astype(np.int32)
+        time_points[0] = np.int32(t_start)
+        time_points[-1] = np.int32(0)
+        if np.any(np.diff(time_points) >= 0):
+            raise ValueError("Reverse timestep grid must be strictly decreasing")
+        return time_points[:-1], time_points[1:]
+
     def get_pred_components(self, x_t, t, pred_type, y_pred, clip_denoise):
         """
         Convert model prediction to noise, image, and velocity components.
@@ -165,9 +193,9 @@ class DiffusionUtility:
             t: Timestep tensor
             pred_type: Type of prediction ('noise', 'image', 'velocity')
             y_pred: Model prediction
-            clip_denoise: If True, clip predicted clean image to [-1, 1]
-                and recompute the implied noise so both components remain
-                consistent with x_t. This should be used only for inference.
+            clip_denoise: If True, clip predicted clean image to [-1, 1].
+                The model-implied noise is kept unchanged; recomputing it from
+                clipped x0 can distort the deterministic DDIM/ODE direction.
         
         Returns:
             tuple: (pred_noise, pred_image)
@@ -193,11 +221,11 @@ class DiffusionUtility:
         else:
             raise ValueError(f"Invalid pred_type: {pred_type}")
 
-        # Optional inference-time clipping: keep (pred_image, pred_noise)
-        # consistent with x_t after projecting pred_image to the data range.
+        # Optional inference-time clipping: project only the denoised image.
+        # Keep the model-implied noise as the reverse direction, especially for
+        # deterministic DDIM and ODE solvers where eta=0.
         if clip_denoise:
             pred_image = tf.clip_by_value(pred_image, self.CLIP_MIN, self.CLIP_MAX)
-            pred_noise = (x_t - mu_t * pred_image) / (sigma_t + 1.0e-8)
 
         return pred_noise, pred_image
 
@@ -215,6 +243,34 @@ class DiffusionUtility:
             noise = tf.random.normal(shape=_mean.shape, dtype=tf.float32)
             x_s = _mean + _sigma * noise
         return x_s
+
+    def p_sample_flow(self, x_t, pred_noise_t, t, s, pred_noise_s=None, order=1):
+        """Deterministic DDIM probability-flow ODE update.
+
+        With ``order=1`` this is algebraically equivalent to deterministic
+        DDIM (``eta=0``). With ``order=2`` it uses a trapezoidal/Heun correction
+        in the ``x / sqrt(alpha)`` coordinate, evaluating the endpoint noise
+        prediction separately and averaging the two noise fields.
+        """
+        if order not in (1, 2):
+            raise ValueError("order must be 1 or 2")
+        if order == 2 and pred_noise_s is None:
+            raise ValueError("pred_noise_s is required for order=2")
+
+        mu_t = tf.gather(self.mu_coefs, t)[:, None, None, None]
+        sigma_t = tf.gather(self.sigma_coefs, t)[:, None, None, None]
+        mu_s = tf.gather(self.mu_coefs, s)[:, None, None, None]
+        sigma_s = tf.gather(self.sigma_coefs, s)[:, None, None, None]
+
+        eps = pred_noise_t
+        if order == 2:
+            eps = 0.5 * (pred_noise_t + pred_noise_s)
+
+        gamma_t = sigma_t / (mu_t + 1.0e-8)
+        gamma_s = sigma_s / (mu_s + 1.0e-8)
+        y_t = x_t / (mu_t + 1.0e-8)
+        y_s = y_t + (gamma_s - gamma_t) * eps
+        return mu_s * y_s
 
     def get_timestep_info(self, t):
         """Get diffusion coefficients for a given timestep."""

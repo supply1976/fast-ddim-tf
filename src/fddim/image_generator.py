@@ -30,6 +30,28 @@ class ImageGenerator:
         self.ema_network = ema_network
         self.timesteps = timesteps
         self.num_classes = num_classes
+
+    def _normalize_sampler(self, sampler):
+        """Normalize sampler aliases used by configs and code."""
+        sampler = (sampler or "ddim").lower()
+        aliases = {
+            "ddim": "ddim",
+            "flow_euler": "flow_euler",
+            "euler": "flow_euler",
+            "ddim_euler": "flow_euler",
+            "flow_heun": "flow_heun",
+            "heun": "flow_heun",
+            "ddim_heun": "flow_heun",
+            "ddim_2nd": "flow_heun",
+        }
+        if sampler not in aliases:
+            raise ValueError(
+                "sampler must be one of: ddim, flow_euler, flow_heun"
+            )
+        sampler = aliases[sampler]
+        if sampler != "ddim" and self.diff_util.ddim_eta != 0.0:
+            raise ValueError(f"{sampler} is deterministic and requires DDIM_ETA: 0.0")
+        return sampler
     
     def _prepare_labels(self, num_images, labels=None):
         """Prepare class labels for conditional generation."""
@@ -181,6 +203,72 @@ class ImageGenerator:
             x_t, tt, self.diff_util.pred_type, y_pred, clip_denoise=clip_denoise
         )
         return pred_noise, pred_image
+
+    def _denoise_for_task(
+        self,
+        samples,
+        t,
+        clip_denoise,
+        labels,
+        gen_task="random",
+        canvas_patch_size=None,
+        canvas_stride=None,
+        use_ema_model=True,
+    ):
+        if gen_task == 'canvas_gen':
+            return self._denoise_step_patches_to_canvas(
+                samples,
+                canvas_patch_size,
+                canvas_stride,
+                tf.constant(t, dtype=tf.int32),
+                clip_denoise,
+                labels,
+            )
+        return self._denoise_step(
+            samples,
+            tf.constant(t, dtype=tf.int32),
+            clip_denoise,
+            use_ema_model=use_ema_model,
+            labels=labels,
+        )
+
+    def _sample_reverse_step(
+        self,
+        samples,
+        t,
+        s,
+        eps_t,
+        pred_image,
+        sampler,
+        clip_denoise,
+        labels,
+        gen_task="random",
+        canvas_patch_size=None,
+        canvas_stride=None,
+        use_ema_model=True,
+    ):
+        tt = tf.cast(tf.fill((tf.shape(samples)[0],), t), tf.int32)
+        ss = tf.cast(tf.fill((tf.shape(samples)[0],), s), tf.int32)
+        if sampler == "ddim":
+            return self.diff_util.p_sample_ddim(pred_image, eps_t, tt, ss)
+
+        x_pred = self.diff_util.p_sample_flow(samples, eps_t, tt, ss, order=1)
+        if sampler == "flow_euler" or int(s) == 0:
+            return x_pred
+
+        eps_s, _ = self._denoise_for_task(
+            x_pred,
+            int(s),
+            clip_denoise,
+            labels,
+            gen_task=gen_task,
+            canvas_patch_size=canvas_patch_size,
+            canvas_stride=canvas_stride,
+            use_ema_model=use_ema_model,
+        )
+        return self.diff_util.p_sample_flow(
+            samples, eps_t, tt, ss, pred_noise_s=eps_s, order=2
+        )
     
     def _prepare_overlap_inpaint(self, base_images, overlap_dir, overlap_size):
         """
@@ -240,6 +328,7 @@ class ImageGenerator:
                       clip_denoise=True,
                       use_ema_model=True, 
                       labels=None,
+                      sampler="ddim",
                       ):
         """
         Generate samples and return them as numpy arrays.
@@ -255,28 +344,38 @@ class ImageGenerator:
             gen_inputs: Optional initial samples (if None, uses random noise)
             use_ema_model: Whether to use EMA network for inference
             labels: Optional class labels for conditional generation
+            sampler: Reverse sampler. "ddim" keeps the original sampler,
+                "flow_euler" is deterministic DDIM written as an ODE step,
+                and "flow_heun" adds a 2nd-order endpoint correction.
             
         Returns:
             np.ndarray: Generated images as numpy array
         """
+        sampler = self._normalize_sampler(sampler)
         # prepare initial samples and labels
         img_h, img_w, img_c = self.network.inputs[0].shape[1:]
         shape = (num_images, img_h, img_w, img_c)
         samples = tf.random.normal(shape=shape, dtype=tf.float32) 
         labels = self._prepare_labels(num_images, labels)
-        reverse_stride = self.timesteps // reverse_steps
-        if reverse_stride < 1:
-            raise ValueError("reverse_steps must be <= timesteps")
-        reverse_timeindex = np.arange(self.timesteps, 0, -reverse_stride, dtype=np.int32)
+        reverse_timeindex, reverse_nextindex = self.diff_util.make_reverse_time_pairs(
+            self.timesteps, reverse_steps
+        )
          
-        for i, t in enumerate(tqdm.tqdm(reverse_timeindex)):
-            s = reverse_timeindex[i+1] if i < len(reverse_timeindex)-1 else np.int32(0)
-            tt = tf.cast(tf.fill((tf.shape(samples)[0],), t), tf.int32)
-            ss = tf.cast(tf.fill((tf.shape(samples)[0],), s), tf.int32)
+        for t, s in tqdm.tqdm(zip(reverse_timeindex, reverse_nextindex), total=len(reverse_timeindex)):
             pred_noise, pred_image = self._denoise_step(
                 samples, tf.constant(t, dtype=tf.int32), clip_denoise, use_ema_model, labels
             )
-            samples = self.diff_util.p_sample_ddim(pred_image, pred_noise, tt, ss)
+            samples = self._sample_reverse_step(
+                samples,
+                int(t),
+                int(s),
+                pred_noise,
+                pred_image,
+                sampler,
+                clip_denoise,
+                labels,
+                use_ema_model=use_ema_model,
+            )
         # final postprocessing
         samples = samples.numpy()
         samples = np.clip(samples, -1, 1)
@@ -291,6 +390,7 @@ class ImageGenerator:
                                  canvas_patch_size=None,
                                  canvas_stride=None,
                                  reverse_steps=100,
+                                 sampler="ddim",
                                  savedir='./',
                                  save_intermediate=False,
                                  save_format='png',
@@ -320,6 +420,7 @@ class ImageGenerator:
             canvas_patch_size: For large canvas generation, size of each patch
             canvas_stride: For large canvas generation, stride between patches
             reverse_steps: Number of reverse steps for diffusion
+            sampler: Reverse sampler: "ddim", "flow_euler", or "flow_heun".
             savedir: Directory to save generated images
             save_intermediate: Whether to save denoised images at intermediate timesteps
             clip_denoise: If True, clip predicted x0 during reverse sampling
@@ -338,6 +439,9 @@ class ImageGenerator:
 
         Returns:
         """
+        sampler = self._normalize_sampler(sampler)
+        if sampler != "ddim" and self_guide_scale > 0.0:
+            raise ValueError("SELF_GUIDE_SCALE is only supported with sampler='ddim'")
         if batch_size is None:
             batch_size = min(100, num_images)
         logging.info(f"[IMGEN] ===== Image Generation =====")
@@ -346,6 +450,7 @@ class ImageGenerator:
         logging.info(f"[IMGEN] Number of batches: {(num_images + batch_size - 1) // batch_size}")
         logging.info(f"[IMGEN] Images per subfolder: {images_per_subfolder}")
         logging.info(f"[IMGEN] Reverse steps: {reverse_steps}")
+        logging.info(f"[IMGEN] Sampler: {sampler}")
         
         # Create main save directory
         Path(savedir).mkdir(parents=True, exist_ok=True)
@@ -374,6 +479,7 @@ class ImageGenerator:
                     canvas_patch_size=canvas_patch_size,
                     canvas_stride=canvas_stride,
                     reverse_steps=reverse_steps,
+                    sampler=sampler,
                     savedir=savedir,
                     save_intermediate=save_intermediate,
                     save_format=save_format,
@@ -451,6 +557,7 @@ class ImageGenerator:
                                canvas_patch_size,
                                canvas_stride,
                                reverse_steps,
+                               sampler,
                                savedir,
                                save_intermediate,
                                save_format,
@@ -548,32 +655,29 @@ class ImageGenerator:
             output_dict['intermediate'] = {}
             logging.info("[IMGEN] Intermediate saving enabled - will store denoised images at each step")
         
-        reverse_stride = t_start // reverse_steps
-        if reverse_stride < 1:
-            raise ValueError("reverse_steps must be <= t_start")
-        
         # Generation loop
-        reverse_timeindex = np.arange(t_start, 0, -reverse_stride, dtype=np.int32)
+        reverse_timeindex, reverse_nextindex = self.diff_util.make_reverse_time_pairs(
+            t_start, reverse_steps
+        )
         eps_prev = None
         
         logging.debug(f"[IMGEN] Starting reverse diffusion with {len(reverse_timeindex)} steps")
         
         progress_bar = tqdm.tqdm(
-            reverse_timeindex, 
+            list(zip(reverse_timeindex, reverse_nextindex)),
             desc=f"Batch generation",
+            total=len(reverse_timeindex),
             file=sys.stderr,
             ncols=100,
             disable=None  # Auto-disable if not a TTY
             )
         
-        for i, t in enumerate(progress_bar):
+        for t, s in progress_bar:
             # main loop for reverse diffusion
             # ex: 
             # t = [1000, 990, 980, ..., 10] for stride=10, steps=100
             # s = [990, 980, ..., 0]
-            s = reverse_timeindex[i+1] if i < len(reverse_timeindex)-1 else np.int32(0)
             tt = tf.cast(tf.fill((tf.shape(samples)[0],), t), tf.int32) # [B,]
-            ss = tf.cast(tf.fill((tf.shape(samples)[0],), s), tf.int32) # [B,]
             
             if inpaint_mask is not None:
                 """
@@ -596,31 +700,37 @@ class ImageGenerator:
                 else:
                     samples = samples * inpaint_mask + base_images * (1 - inpaint_mask)
             
-            # apply _denoise_step()
-            if gen_task == 'canvas_gen':
-                eps_t, pred_image = self._denoise_step_patches_to_canvas(
-                    samples, 
-                    canvas_patch_size, 
-                    canvas_stride, 
-                    tf.constant(t, dtype=tf.int32), 
-                    clip_denoise, 
-                    batch_labels,
-                )
-            else:
-                eps_t, pred_image = self._denoise_step(
-                    samples,
-                    tf.constant(t, dtype=tf.int32),
-                    clip_denoise,
-                    use_ema_model=True,
-                    labels=batch_labels,
-                )
+            eps_t, pred_image = self._denoise_for_task(
+                samples,
+                int(t),
+                clip_denoise,
+                batch_labels,
+                gen_task=gen_task,
+                canvas_patch_size=canvas_patch_size,
+                canvas_stride=canvas_stride,
+                use_ema_model=True,
+            )
             
             if self_guide_scale > 0.0:
                 eps_guide = eps_t + self_guide_scale * (eps_prev - eps_t) if eps_prev is not None else eps_t
+                ss = tf.cast(tf.fill((tf.shape(samples)[0],), s), tf.int32) # [B,]
                 samples = self.diff_util.p_sample_ddim(pred_image, eps_guide, tt, ss)
                 eps_prev = eps_t
             else:
-                samples = self.diff_util.p_sample_ddim(pred_image, eps_t, tt, ss)
+                samples = self._sample_reverse_step(
+                    samples,
+                    int(t),
+                    int(s),
+                    eps_t,
+                    pred_image,
+                    sampler,
+                    clip_denoise,
+                    batch_labels,
+                    gen_task=gen_task,
+                    canvas_patch_size=canvas_patch_size,
+                    canvas_stride=canvas_stride,
+                    use_ema_model=True,
+                )
 
             if s==0 and inpaint_mask is not None:
                 # Final step correction to ensure exact data consistency at the end of generation for inpainting tasks.
