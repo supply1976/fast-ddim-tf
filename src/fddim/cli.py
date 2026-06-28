@@ -37,6 +37,11 @@ from .callbacks import (
     BestModelCheckpoint,
     RobustCSVLogger,
 )
+from .metrics import (
+    compute_reference_image_metrics,
+    min_images_for_pair_count,
+    save_metrics_json,
+)
 
 # =====================
 # Configuration Classes
@@ -270,6 +275,7 @@ class ImageGenConfig:
     num_gen_images: int = 20
     batch_size: Optional[int] = None
     reverse_steps: int = 100
+    sampler: str = "ddim"
     ddim_eta: float = 0.0
     random_seed: Optional[int] = None
     target_image_size: Union[int, Tuple[int, int]] = None # int or (int, int)
@@ -299,6 +305,7 @@ class ImageGenConfig:
         num_gen_images: int = 20,
         batch_size: Optional[int] = None,
         reverse_steps: int = 100,
+        sampler: str = "ddim",
         ddim_eta: float = 0.0,
         random_seed: Optional[int] = None,
         target_image_size: Union[int, Tuple[int, int]] = None,
@@ -324,6 +331,7 @@ class ImageGenConfig:
         self.num_gen_images = num_gen_images
         self.batch_size = batch_size
         self.reverse_steps = reverse_steps
+        self.sampler = sampler
         self.ddim_eta = ddim_eta
         self.random_seed = random_seed
         self.target_image_size = target_image_size
@@ -472,6 +480,7 @@ class ConfigManager:
             num_gen_images    = imgen_dict.get('NUM_GEN_IMAGES', 20),
             batch_size        = imgen_dict.get('BATCH_SIZE'),
             reverse_steps     = imgen_dict.get('REVERSE_STEPS', 100),
+            sampler           = imgen_dict.get('SAMPLER', 'ddim'),
             canvas_shape      = imgen_dict.get('CANVAS_SHAPE'),
             canvas_patch_size = imgen_dict.get('CANVAS_PATCH_SIZE'),
             canvas_stride     = imgen_dict.get('CANVAS_STRIDE'),
@@ -719,6 +728,45 @@ class DatasetManager:
         return train_ds, valid_ds
 
 
+class ReferenceMetricsManager:
+    """Collect real training images and save baseline pairwise metrics."""
+
+    @staticmethod
+    def _get_images(batch_data):
+        return batch_data[0] if isinstance(batch_data, (list, tuple)) else batch_data
+
+    @classmethod
+    def compute_and_save(
+        cls,
+        train_ds: tf.data.Dataset,
+        output_path: str,
+        num_pairs: int = 1000,
+        num_images: Optional[int] = None,
+        pair_seed: int = 0,
+    ) -> None:
+        min_images = min_images_for_pair_count(num_pairs)
+        target_images = max(num_images or min_images, min_images)
+        batches = []
+        total_images = 0
+
+        for batch_data in train_ds:
+            batch_images = cls._get_images(batch_data).numpy()
+            batches.append(batch_images)
+            total_images += int(batch_images.shape[0])
+            if total_images >= target_images:
+                break
+
+        real_images = np.concatenate(batches, axis=0)[:target_images]
+        real_images = np.clip(0.5 * (real_images + 1.0), 0.0, 1.0).astype(np.float32)
+        metrics = compute_reference_image_metrics(
+            real_images,
+            num_pairs=num_pairs,
+            pair_seed=pair_seed,
+            source="real_train_images",
+        )
+        save_metrics_json(output_path, metrics, digits=3)
+
+
 class LoggingManager:
     """Handles structured logging."""
     
@@ -834,6 +882,16 @@ class DiffusionTrainer:
         # save diffusion_scheduler_config to yaml
         with open(os.path.join(logging_dir, "scheduler_config.yaml"), 'w') as f:
             f.write(self.diffusion_scheduler_config.to_yaml())
+
+        reference_metrics_path = os.path.join(logging_dir, "reference_metrics.json")
+        ReferenceMetricsManager.compute_and_save(
+            self.train_ds,
+            reference_metrics_path,
+            num_pairs=1000,
+            num_images=128,
+            pair_seed=0,
+        )
+        logging.info(f"[INFO] Reference metrics saved to {reference_metrics_path}")
         
         # Create diffusion utilities and model
         diff_util_train = ModelBuilder.create_diffusion_utility(
@@ -869,14 +927,12 @@ class DiffusionTrainer:
         
         # Setup callbacks
         callbacks = [
-            RobustCSVLogger(os.path.join(logging_dir, "log.csv"), append=True, separator=","),
             keras.callbacks.LambdaCallback(
                 on_epoch_end=lambda epoch, logs: dm.save_models(epoch, savedir=logging_dir)
             ),
             keras.callbacks.LambdaCallback(
                 on_train_end=lambda logs: None  # Placeholder for generate_images_and_save
             ),
-            TQDMProgressBar(),
         ]
         # Add callback to save the best EMA model weights by smallest loss
         callbacks.append(BestModelCheckpoint(
@@ -893,7 +949,18 @@ class DiffusionTrainer:
                 reverse_steps=self.training_config.inline_gen_reverse_steps,
                 savedir=os.path.join(logging_dir, 'inline_gen'),
                 labels=None,
+                metrics_csv_path=os.path.join(logging_dir, "inline_metrics.csv"),
             ))
+
+        callbacks.extend([
+            RobustCSVLogger(
+                os.path.join(logging_dir, "loss.csv"),
+                append=True,
+                separator=",",
+                period=self.training_config.save_period,
+            ),
+            TQDMProgressBar(),
+        ])
         
         # Compile and train
         dm.compile(loss=loss_fn, optimizer=optimizer)
@@ -956,7 +1023,12 @@ class ImageGenerator:
         model_dir = os.path.dirname(self.imgen_config.model_path)
         gen_date = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
         gen_steps = str(self.imgen_config.reverse_steps)
-        gen_save_dir1 = "_".join(["imgen", self.imgen_config.gen_task, gen_steps + "steps"])
+        gen_save_dir1 = "_".join([
+            "imgen",
+            self.imgen_config.gen_task,
+            self.imgen_config.sampler,
+            gen_steps + "steps",
+        ])
         gen_save_dir2 = "_".join([gen_date, os.uname().nodename])
         
         if self.imgen_config.save_dir is None:
@@ -1015,6 +1087,7 @@ class ImageGenerator:
             num_images=self.imgen_config.num_gen_images,
             batch_size=self.imgen_config.batch_size,
             reverse_steps=self.imgen_config.reverse_steps,
+            sampler=self.imgen_config.sampler,
             canvas_shape=self.imgen_config.canvas_shape,
             canvas_patch_size=self.imgen_config.canvas_patch_size,
             canvas_stride=self.imgen_config.canvas_stride,
@@ -1050,6 +1123,7 @@ class ImageGenerator:
         logging.info(f"[IMGEN] freeze channel: {self.imgen_config.freeze_channel}")
         logging.info(f"[IMGEN] class label: {self.imgen_config.class_label}")
         logging.info(f"[IMGEN] Model Predict Type: {self.diffusion_scheduler_config.pred_type}")
+        logging.info(f"[IMGEN] Sampler: {self.imgen_config.sampler}")
         logging.info(f"[IMGEN] DDIM eta = {self.imgen_config.ddim_eta}")
         logging.info(f"[IMGEN] self guide scale = {self.imgen_config.self_guide_scale}")
         logging.info(f"[IMGEN] Set Random Seed: {self.imgen_config.random_seed}")
@@ -1218,6 +1292,7 @@ IMAGE_GENERATION:
     NUM_GEN_IMAGES: 20
     BATCH_SIZE: null
     REVERSE_STEPS: 100
+    SAMPLER: ddim              # ddim | flow_euler | flow_heun
     CANVAS_SHAPE: null         # [H, W] for canvas_gen
     CANVAS_PATCH_SIZE: null
     CANVAS_STRIDE: null
