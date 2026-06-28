@@ -11,6 +11,14 @@ from tensorflow import keras # pyright: ignore[reportMissingModuleSource]
 from tensorflow.keras.applications.inception_v3 import InceptionV3, preprocess_input # type: ignore
 from tqdm import tqdm
 
+from .metrics import (
+    GZIP_RAW_METRIC_FIELDS,
+    PAIRWISE_METRIC_FIELDS,
+    compute_pairwise_image_metrics,
+    format_metric_values,
+    gzip_raw_metrics,
+)
+
 
 class RobustCSVLogger(keras.callbacks.Callback):
     """CSV logger with error handling for network filesystem issues.
@@ -20,12 +28,13 @@ class RobustCSVLogger(keras.callbacks.Callback):
     without crashing the training process.
     """
     
-    def __init__(self, filename, separator=',', append=False, max_retries=3):
+    def __init__(self, filename, separator=',', append=False, max_retries=3, period=None):
         super().__init__()
         self.filename = filename
         self.separator = separator
         self.append = append
         self.max_retries = max_retries
+        self.period = period
         self.keys = None
         self.file_handle = None
         self.writer = None
@@ -60,7 +69,7 @@ class RobustCSVLogger(keras.callbacks.Callback):
         for attempt in range(self.max_retries):
             try:
                 if self.keys is None:
-                    self.keys = sorted(row_dict.keys())
+                    self.keys = ["epoch"] + sorted(k for k in row_dict.keys() if k != "epoch")
                     self.writer.writerow(self.keys)
                 
                 row = [row_dict.get(key, '') for key in self.keys]
@@ -92,8 +101,10 @@ class RobustCSVLogger(keras.callbacks.Callback):
         """Write epoch metrics to CSV."""
         if logs is None:
             return
+        if self.period is not None and (epoch + 1) % self.period != 0:
+            return
         
-        row_dict = {'epoch': epoch}
+        row_dict = {'epoch': epoch + 1}
         row_dict.update(logs)
         self._write_row(row_dict)
     
@@ -278,13 +289,28 @@ class BestModelCheckpoint(keras.callbacks.Callback):
 class InlineImageGenerationCallback(keras.callbacks.Callback):
     """Keras callback to generate and save images at the end of every N epochs."""
     
-    def __init__(self, reverse_steps=50, period=10, savedir='./inline_gen', num_images=4, labels=None):
+    def __init__(
+        self,
+        reverse_steps=50,
+        period=10,
+        savedir='./inline_gen',
+        num_images=4,
+        labels=None,
+        ssim_pairs=1000,
+        duplicate_ssim_threshold=0.98,
+        duplicate_l2_threshold=0.02,
+        metrics_csv_path=None,
+    ):
         super().__init__()
         self.reverse_steps = reverse_steps
         self.period = period
         self.savedir = savedir
         self.num_images = num_images
         self.labels = labels
+        self.ssim_pairs = ssim_pairs
+        self.duplicate_ssim_threshold = duplicate_ssim_threshold
+        self.duplicate_l2_threshold = duplicate_l2_threshold
+        self.metrics_csv_path = metrics_csv_path
         os.makedirs(self.savedir, exist_ok=True)
 
     def on_epoch_end(self, epoch, logs=None):
@@ -306,6 +332,40 @@ class InlineImageGenerationCallback(keras.callbacks.Callback):
             except Exception:
                 logging.exception("[CALLBACK] Inline image generation failed")
             if images is not None:
+                metric_images = images
+                gzip_metrics = gzip_raw_metrics(metric_images)
+                pairwise_metrics = compute_pairwise_image_metrics(
+                    metric_images,
+                    num_pairs=self.ssim_pairs,
+                    pair_seed=epoch + 1,
+                    duplicate_ssim_threshold=self.duplicate_ssim_threshold,
+                    duplicate_l2_threshold=self.duplicate_l2_threshold,
+                )
+                metrics_row = {
+                    "epoch": epoch + 1,
+                    "num_images": int(metric_images.shape[0]),
+                    "image_height": int(metric_images.shape[1]),
+                    "image_width": int(metric_images.shape[2]),
+                    "image_channels": int(metric_images.shape[3]),
+                    "num_pairs": 0,
+                    "reverse_steps": int(self.reverse_steps),
+                    "savedir": savedir,
+                    **gzip_metrics,
+                    **pairwise_metrics,
+                }
+                if metrics_row["num_pairs"] > 0:
+                    logging.info(
+                        "[CALLBACK] Inline pairwise SSIM: "
+                        f"{metrics_row['pairwise_ssim']:.6f} "
+                        f"+/- {metrics_row['pairwise_ssim_std']:.6f} "
+                        f"max={metrics_row['pairwise_ssim_max']:.6f}, "
+                    )
+                self._write_metrics_row(metrics_row)
+                logging.info(
+                    "[CALLBACK] Inline gzip raw compression: "
+                    f"ratio={metrics_row['gzip_raw_compression_ratio']:.6f}, "
+                    f"bits/value={metrics_row['gzip_raw_bits_per_value']:.6f}"
+                )
                 if images.shape[-1]==2:
                     # 2 channels, add a zero channel for saving
                     zeros = np.zeros_like(images)
@@ -320,6 +380,41 @@ class InlineImageGenerationCallback(keras.callbacks.Callback):
                     filepath = os.path.join(savedir, filename)
                     keras.utils.save_img(filepath, img)
                 logging.info(f"[CALLBACK] Inline Images Gen saved to {savedir}")
+
+    def _write_metrics_row(self, row):
+        if self.metrics_csv_path is None:
+            return
+        os.makedirs(os.path.dirname(self.metrics_csv_path), exist_ok=True)
+        fieldnames = [
+            "epoch",
+            "num_images",
+            "image_height",
+            "image_width",
+            "image_channels",
+            "num_pairs",
+            "reverse_steps",
+            *PAIRWISE_METRIC_FIELDS,
+            "near_duplicate_ssim_threshold",
+            "near_duplicate_l2_threshold",
+            "near_duplicate_rate_ssim",
+            "near_duplicate_rate_l2",
+            "near_duplicate_rate_any",
+            *GZIP_RAW_METRIC_FIELDS,
+            "savedir",
+        ]
+        write_header = not os.path.exists(self.metrics_csv_path)
+        try:
+            with open(self.metrics_csv_path, "a", newline="") as f:
+                writer = csv.DictWriter(f, fieldnames=fieldnames)
+                if write_header:
+                    writer.writeheader()
+                csv_row = format_metric_values(
+                    {fieldname: row.get(fieldname) for fieldname in fieldnames},
+                    as_strings=True,
+                )
+                writer.writerow(csv_row)
+        except Exception:
+            logging.exception(f"[CALLBACK] Failed to write inline metrics CSV: {self.metrics_csv_path}")
 
 
 # TODO (not completed): Implement a more comprehensive callback for FID evaluation)
