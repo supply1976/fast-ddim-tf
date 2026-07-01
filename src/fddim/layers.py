@@ -212,8 +212,7 @@ class ResidualBlock(keras.layers.Layer):
     |                             |
     |------------------------> Add (x + temb)
     |
-    |-- [Dropout if needed]
-    |-- GroupNorm --> Activation --> Conv2D (kernel_size)
+    |-- GroupNorm --> Activation --> [Dropout if needed] --> Conv2D (kernel_size)
     |                             |
     |------------------------> Add (x + residual)
     |
@@ -278,7 +277,7 @@ class ResidualBlock(keras.layers.Layer):
     def build(self, input_shape):
         super().build(input_shape)
 
-    def call(self, inputs):
+    def call(self, inputs, training=None):
         if not (isinstance(inputs, (list, tuple)) and len(inputs) == 2):
             raise ValueError("inputs must be a tuple/list of (x, t)")
         x, t = inputs
@@ -293,11 +292,11 @@ class ResidualBlock(keras.layers.Layer):
         x = self.act1(x)
         x = self.conv1(x)
         x = x + temb
-        #if self.dropout is not None: x = self.dropout(x)
         x = self.norm2(x)
         x = self.act2(x)
+        if self.dropout is not None:
+            x = self.dropout(x, training=training)
         x = self.conv2(x)
-        if self.dropout is not None: x = self.dropout(x)
         x = x + residual # Residual connection
         if self.attention:
             res_output = x
@@ -305,10 +304,10 @@ class ResidualBlock(keras.layers.Layer):
             if self.use_cross_attention:
                 # Project time embedding to cross-attention context
                 ctx = self.cross_attn_proj(t)  # [B, width]
-                ctx = ctx[:, None, :]  # [B, 1, width] for cross-attention
-                x = self.mha(x, ctx)  # Query from x, Key/Value from ctx
+                ctx = ctx[:, None, None, :]  # [B, 1, 1, width] for cross-attention
+                x = self.mha(x, ctx, training=training)  # Query from x, Key/Value from ctx
             else:
-                x = self.mha(x, x)
+                x = self.mha(x, x, training=training)
             x = x + res_output
         return x
 
