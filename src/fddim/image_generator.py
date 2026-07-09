@@ -252,7 +252,10 @@ class ImageGenerator:
         if sampler == "ddim":
             return self.diff_util.p_sample_ddim(pred_image, eps_t, tt, ss)
 
-        x_pred = self.diff_util.p_sample_flow(samples, eps_t, tt, ss, order=1)
+        if clip_denoise:
+            x_pred = self.diff_util.p_sample_ddim(pred_image, eps_t, tt, ss)
+        else:
+            x_pred = self.diff_util.p_sample_flow(samples, eps_t, tt, ss, order=1)
         if sampler == "flow_euler" or int(s) == 0:
             return x_pred
 
@@ -266,6 +269,15 @@ class ImageGenerator:
             canvas_stride=canvas_stride,
             use_ema_model=use_ema_model,
         )
+        if clip_denoise:
+            eps_avg = 0.5 * (eps_t + eps_s)
+            mu_t = tf.gather(self.diff_util.mu_coefs, tt)[:, None, None, None]
+            sigma_t = tf.gather(self.diff_util.sigma_coefs, tt)[:, None, None, None]
+            pred_image_avg = (samples - sigma_t * eps_avg) / (mu_t + 1.0e-8)
+            pred_image_avg = tf.clip_by_value(
+                pred_image_avg, self.diff_util.CLIP_MIN, self.diff_util.CLIP_MAX
+            )
+            return self.diff_util.p_sample_ddim(pred_image_avg, eps_avg, tt, ss)
         return self.diff_util.p_sample_flow(
             samples, eps_t, tt, ss, pred_noise_s=eps_s, order=2
         )
