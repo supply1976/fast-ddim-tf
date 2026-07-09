@@ -10,7 +10,7 @@ Features:
 - Supports XLA JIT compilation for performance.
 """
 
-import os
+import os, sys
 import ast
 import time
 import datetime
@@ -617,7 +617,7 @@ class DirectoryManager:
         logging.basicConfig(
             level=logging.INFO,
             format="%(message)s",
-            handlers=[logging.FileHandler(filename, mode=mode), logging.StreamHandler()],
+            handlers=[logging.FileHandler(filename, mode=mode), logging.StreamHandler(sys.stdout)],
         )
     
     @staticmethod

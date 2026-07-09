@@ -512,6 +512,7 @@ class ImageGenerator:
                 
                 total_generated += current_batch_size
                 logging.info(f"[IMGEN] Batch {batch_count} completed. Progress: {total_generated}/{num_images}")
+                sys.stdout.flush()
                 
             except Exception as e:
                 logging.error(f"[IMGEN] Error in batch {batch_count}: {str(e)}")
@@ -675,16 +676,7 @@ class ImageGenerator:
         
         logging.debug(f"[IMGEN] Starting reverse diffusion with {len(reverse_timeindex)} steps")
         
-        progress_bar = tqdm.tqdm(
-            list(zip(reverse_timeindex, reverse_nextindex)),
-            desc=f"Batch generation",
-            total=len(reverse_timeindex),
-            file=sys.stderr,
-            ncols=100,
-            disable=None  # Auto-disable if not a TTY
-            )
-        
-        for t, s in progress_bar:
+        for t, s in list(zip(reverse_timeindex, reverse_nextindex)):
             # main loop for reverse diffusion
             # ex: 
             # t = [1000, 990, 980, ..., 10] for stride=10, steps=100
