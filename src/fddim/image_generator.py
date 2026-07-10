@@ -1,30 +1,52 @@
-import gc, sys
+import gc
 import logging
+import sys
+from pathlib import Path
+
 import numpy as np
 import tensorflow as tf
 import tqdm
 from PIL import Image
-from pathlib import Path
 
 
 class ImageGenerator:
+    """Run inference-only reverse diffusion for image generation tasks.
+
+    The generator owns sampler selection, model evaluation, inference-time
+    thresholding of predicted clean images, and task-specific conditioning. It
+    supports first-order DDIM and a deterministic second-order DDIM/Heun
+    corrector. Both solvers work with random generation, patch-based canvas
+    generation, image-to-image generation, and the inpainting variants handled
+    by :meth:`generate_images_and_save`.
+
+    Predicted noise is never modified by thresholding. When ``clip_denoise`` is
+    enabled, only the predicted clean image (``pred_image`` or x0) is projected
+    using the fixed or dynamic policy configured on ``diff_util``.
+
+    Args:
+        diff_util: Diffusion utility containing the schedule and DDIM update.
+        network: Trained diffusion network.
+        ema_network: Exponential-moving-average network used by default.
+        timesteps: Number of forward diffusion timesteps.
+        num_classes: Number of conditional classes, or ``None`` for an
+            unconditional model.
     """
-    Handles image generation and sampling for diffusion models.
-    Separated from the main DiffusionModel for better modularity.
-    """
+
+    _SAMPLER_ALIASES = {
+        "ddim": "ddim_1st",
+        "ddim_1st": "ddim_1st",
+        "ddim_first": "ddim_1st",
+        "ddim_euler": "ddim_1st",
+        "euler": "ddim_1st",
+        "flow_euler": "ddim_1st",
+        "ddim_2nd": "ddim_2nd",
+        "ddim_second": "ddim_2nd",
+        "ddim_heun": "ddim_2nd",
+        "heun": "ddim_2nd",
+        "flow_heun": "ddim_2nd",
+    }
     
     def __init__(self, diff_util, network, ema_network, timesteps, num_classes=None):
-        """
-        Initialize the ImageGenerator with a trained diffusion model.
-        use ema_network for inference.
-        
-        Args:
-            diff_util: Diffusion utility instance
-            network: The main network for diffusion
-            ema_network: The EMA (Exponential Moving Average) network for inference
-            timesteps: Number of diffusion timesteps
-            num_classes: Number of classes for conditional generation (optional)
-        """
         self.diff_util = diff_util
         self.network = network
         self.ema_network = ema_network
@@ -32,26 +54,28 @@ class ImageGenerator:
         self.num_classes = num_classes
 
     def _normalize_sampler(self, sampler):
-        """Normalize sampler aliases used by configs and code."""
-        sampler = (sampler or "ddim").lower()
-        aliases = {
-            "ddim": "ddim",
-            "flow_euler": "flow_euler",
-            "euler": "flow_euler",
-            "ddim_euler": "flow_euler",
-            "flow_heun": "flow_heun",
-            "heun": "flow_heun",
-            "ddim_heun": "flow_heun",
-            "ddim_2nd": "flow_heun",
-        }
-        if sampler not in aliases:
+        """Return a canonical sampler name while accepting legacy aliases."""
+        if sampler is None:
+            sampler = "ddim_1st"
+        if not isinstance(sampler, str):
+            raise TypeError("sampler must be a string")
+
+        sampler_key = sampler.strip().lower()
+        if sampler_key not in self._SAMPLER_ALIASES:
             raise ValueError(
-                "sampler must be one of: ddim, flow_euler, flow_heun"
+                "sampler must be 'ddim_1st' or 'ddim_2nd' "
+                "('ddim', 'flow_euler', and 'flow_heun' remain aliases)"
             )
-        sampler = aliases[sampler]
-        if sampler != "ddim" and self.diff_util.ddim_eta != 0.0:
-            raise ValueError(f"{sampler} is deterministic and requires DDIM_ETA: 0.0")
-        return sampler
+        normalized_sampler = self._SAMPLER_ALIASES[sampler_key]
+        if normalized_sampler == "ddim_2nd" and self.diff_util.ddim_eta != 0.0:
+            raise ValueError("ddim_2nd is deterministic and requires DDIM_ETA: 0.0")
+        return normalized_sampler
+
+    def _threshold_pred_image(self, pred_image, enabled):
+        """Apply the configured fixed or dynamic threshold to predicted x0."""
+        if not enabled:
+            return pred_image
+        return self.diff_util.apply_denoise_threshold(pred_image)
     
     def _prepare_labels(self, num_images, labels=None):
         """Prepare class labels for conditional generation."""
@@ -70,17 +94,23 @@ class ImageGenerator:
         clip_denoise,
         labels=None,
     ):
-        # TODO
-        """Denoise step for large canvas generation using patches.
+        """Predict a canvas-wide noise field and x0 from overlapping patches.
+
+        Patch noise predictions are averaged in overlap regions before the
+        canvas-wide clean image is reconstructed. Thresholding is deliberately
+        applied after reconstruction so dynamic thresholds are computed per
+        complete output image rather than independently per patch.
+
         Args:
-            x_t: Full canvas tensor at time t, tf.Tensor of shape (B, H, W, C)
-            patch_size: Size of each patch
-            stride: Stride between patches (controls overlap)
-            t: Current timestep
-            clip_denoise: Whether to clip denoising predictions
-            labels: Optional class labels
+            x_t: Canvas tensor with shape ``(batch, height, width, channels)``.
+            patch_size: Height and width of each square model input patch.
+            stride: Spatial stride between overlapping patches.
+            t: Scalar current timestep.
+            clip_denoise: Whether to threshold the reconstructed x0.
+            labels: Optional class labels for each canvas.
+
         Returns:
-            pred_noise_canvas, pred_image_canvas: Denoised full canvas tensor at time t, tf.Tensor of shape (B, H, W, C)
+            A ``(pred_noise, pred_image)`` tuple matching the canvas shape.
         """
         # split x_t into patches
         patches = tf.image.extract_patches(
@@ -90,15 +120,17 @@ class ImageGenerator:
             rates=[1, 1, 1, 1],
             padding='VALID',
         ) # (B, n_h, n_w, patch_size*patch_size*C)
-        B = tf.shape(patches)[0]
+        batch_size = tf.shape(patches)[0]
         n_h = tf.shape(patches)[1]
         n_w = tf.shape(patches)[2]
-        C = tf.shape(x_t)[-1]
-        patches = tf.reshape(patches, (-1, patch_size, patch_size, C)) # (B*n_h*n_w, patch_size, patch_size, C)
+        channels = tf.shape(x_t)[-1]
+        patches = tf.reshape(
+            patches, (-1, patch_size, patch_size, channels)
+        )
         
         # Prepare timesteps for all patches
-        tt = tf.fill((tf.shape(patches)[0],), t)
-        inputs = [patches, tt]
+        t_batch = tf.fill((tf.shape(patches)[0],), t)
+        inputs = [patches, t_batch]
         
         # Fix: Properly replicate labels for all patches
         # Each batch element's label should be repeated n_h*n_w times
@@ -107,21 +139,32 @@ class ImageGenerator:
             inputs.append(labels_expanded)
             
         y_pred = self.ema_network(inputs, training=False)
-        pred_noise, pred_image = self.diff_util.get_pred_components(
-            patches, tt, self.diff_util.pred_type, y_pred, clip_denoise=clip_denoise
+        pred_noise, _ = self.diff_util.get_pred_components(
+            patches,
+            t_batch,
+            self.diff_util.pred_type,
+            y_pred,
+            clip_denoise=False,
         )
         # calculate the scores
-        sigma_tt = tf.gather(self.diff_util.sigma_coefs, tt)[:, None, None, None]
-        scores = - pred_noise / sigma_tt # (B*n_h*n_w, patch_size, patch_size, C)
-        scores = tf.reshape(scores, (B, n_h, n_w, patch_size, patch_size, C))
+        sigma_t_batch = tf.gather(self.diff_util.sigma_coefs, t_batch)[
+            :, None, None, None
+        ]
+        scores = -pred_noise / sigma_t_batch
+        scores = tf.reshape(
+            scores,
+            (batch_size, n_h, n_w, patch_size, patch_size, channels),
+        )
         # blend scores (average) to reconstruct full canvas score
         # Initialize canvas and count for averaging
-        canvas_shape = (B, (n_h - 1) * stride + patch_size, (n_w - 1) * stride + patch_size, C)
+        canvas_shape = (
+            batch_size,
+            (n_h - 1) * stride + patch_size,
+            (n_w - 1) * stride + patch_size,
+            channels,
+        )
         score_canvas = tf.zeros(canvas_shape, dtype=scores.dtype)
         count = tf.zeros(canvas_shape, dtype=scores.dtype)
-        
-        # reconstruct full canvas from denoised patches, blending overlaps by averaging
-        #pred_image_patches = tf.reshape(pred_image, (B, n_h, n_w, patch_size, patch_size, C))
         
         # Accumulate patches using tf.while_loop (proper tf.function support)
         def accumulate_patches(i, score_canvas, count):
@@ -185,13 +228,16 @@ class ImageGenerator:
         # reconstruct pred_noise and pred_image for full canvas
         pred_noise_canvas = - score_canvas * sigma_t
         pred_image_canvas = (x_t + var_t * score_canvas) / (mu_t + 1.0e-8)
+        pred_image_canvas = self._threshold_pred_image(
+            pred_image_canvas, enabled=clip_denoise
+        )
         return pred_noise_canvas, pred_image_canvas
      
     @tf.function 
     def _denoise_step(self, x_t, t, clip_denoise, use_ema_model=True, labels=None):
-        """Get predict noise and predict image (x0) at time t using input x_t."""
-        tt = tf.fill((tf.shape(x_t)[0],), t)
-        inputs = [x_t, tt]
+        """Predict noise and x0 at ``t``, thresholding only the x0 estimate."""
+        t_batch = tf.fill((tf.shape(x_t)[0],), t)
+        inputs = [x_t, t_batch]
         if labels is not None:
             inputs.append(labels)
         y_pred = None
@@ -200,13 +246,16 @@ class ImageGenerator:
         else:
             y_pred = self.network(inputs, training=False)
         pred_noise, pred_image = self.diff_util.get_pred_components(
-            x_t, tt, self.diff_util.pred_type, y_pred, clip_denoise=clip_denoise
+            x_t, t_batch, self.diff_util.pred_type, y_pred, clip_denoise=False
+        )
+        pred_image = self._threshold_pred_image(
+            pred_image, enabled=clip_denoise
         )
         return pred_noise, pred_image
 
     def _denoise_for_task(
         self,
-        samples,
+        x_t,
         t,
         clip_denoise,
         labels,
@@ -215,9 +264,10 @@ class ImageGenerator:
         canvas_stride=None,
         use_ema_model=True,
     ):
+        """Evaluate the model through the denoiser required by ``gen_task``."""
         if gen_task == 'canvas_gen':
             return self._denoise_step_patches_to_canvas(
-                samples,
+                x_t,
                 canvas_patch_size,
                 canvas_stride,
                 tf.constant(t, dtype=tf.int32),
@@ -225,7 +275,7 @@ class ImageGenerator:
                 labels,
             )
         return self._denoise_step(
-            samples,
+            x_t,
             tf.constant(t, dtype=tf.int32),
             clip_denoise,
             use_ema_model=use_ema_model,
@@ -234,11 +284,11 @@ class ImageGenerator:
 
     def _sample_reverse_step(
         self,
-        samples,
+        x_t,
         t,
         s,
-        eps_t,
-        pred_image,
+        pred_noise_t,
+        pred_image_t,
         sampler,
         clip_denoise,
         labels,
@@ -247,20 +297,28 @@ class ImageGenerator:
         canvas_stride=None,
         use_ema_model=True,
     ):
-        tt = tf.cast(tf.fill((tf.shape(samples)[0],), t), tf.int32)
-        ss = tf.cast(tf.fill((tf.shape(samples)[0],), s), tf.int32)
-        if sampler == "ddim":
-            return self.diff_util.p_sample_ddim(pred_image, eps_t, tt, ss)
+        """Advance one reverse-time step with first- or second-order DDIM.
 
-        if clip_denoise:
-            x_pred = self.diff_util.p_sample_ddim(pred_image, eps_t, tt, ss)
-        else:
-            x_pred = self.diff_util.p_sample_flow(samples, eps_t, tt, ss, order=1)
-        if sampler == "flow_euler" or int(s) == 0:
-            return x_pred
+        ``ddim_1st`` performs the standard DDIM update from ``t`` to ``s``.
+        ``ddim_2nd`` first predicts ``x_s`` with that update, evaluates the
+        denoiser at the predicted endpoint, then applies a trapezoidal (Heun)
+        correction by averaging the two predicted noise fields. The corrected
+        clean-image estimate is reconstructed at ``t`` and passed through the
+        same fixed/dynamic threshold policy as the first-order estimate.
 
-        eps_s, _ = self._denoise_for_task(
-            x_pred,
+        The endpoint model evaluation is skipped for ``s == 0`` because the
+        clean endpoint has no subsequent integration interval.
+        """
+        t_batch = tf.cast(tf.fill((tf.shape(x_t)[0],), t), tf.int32)
+        s_batch = tf.cast(tf.fill((tf.shape(x_t)[0],), s), tf.int32)
+        x_s_predictor = self.diff_util.p_sample_ddim(
+            pred_image_t, pred_noise_t, t_batch, s_batch
+        )
+        if sampler == "ddim_1st" or int(s) == 0:
+            return x_s_predictor
+
+        pred_noise_s, _ = self._denoise_for_task(
+            x_s_predictor,
             int(s),
             clip_denoise,
             labels,
@@ -269,17 +327,20 @@ class ImageGenerator:
             canvas_stride=canvas_stride,
             use_ema_model=use_ema_model,
         )
-        if clip_denoise:
-            eps_avg = 0.5 * (eps_t + eps_s)
-            mu_t = tf.gather(self.diff_util.mu_coefs, tt)[:, None, None, None]
-            sigma_t = tf.gather(self.diff_util.sigma_coefs, tt)[:, None, None, None]
-            pred_image_avg = (samples - sigma_t * eps_avg) / (mu_t + 1.0e-8)
-            pred_image_avg = tf.clip_by_value(
-                pred_image_avg, self.diff_util.CLIP_MIN, self.diff_util.CLIP_MAX
-            )
-            return self.diff_util.p_sample_ddim(pred_image_avg, eps_avg, tt, ss)
-        return self.diff_util.p_sample_flow(
-            samples, eps_t, tt, ss, pred_noise_s=eps_s, order=2
+        corrected_pred_noise = 0.5 * (pred_noise_t + pred_noise_s)
+        mu_t = tf.gather(self.diff_util.mu_coefs, t_batch)[:, None, None, None]
+        sigma_t = tf.gather(self.diff_util.sigma_coefs, t_batch)[:, None, None, None]
+        corrected_pred_image = (
+            x_t - sigma_t * corrected_pred_noise
+        ) / (mu_t + 1.0e-8)
+        corrected_pred_image = self._threshold_pred_image(
+            corrected_pred_image, enabled=clip_denoise
+        )
+        return self.diff_util.p_sample_ddim(
+            corrected_pred_image,
+            corrected_pred_noise,
+            t_batch,
+            s_batch,
         )
     
     def _prepare_overlap_inpaint(self, base_images, overlap_dir, overlap_size):
@@ -334,34 +395,34 @@ class ImageGenerator:
             mask[:, 0:overlap_size, :, :] = 0
         return anchor, mask
     
-    def sample_images(self,
-                      reverse_steps=100, 
-                      num_images=20, 
-                      clip_denoise=True,
-                      use_ema_model=True, 
-                      labels=None,
-                      sampler="ddim",
-                      ):
-        """
-        Generate samples and return them as numpy arrays.
+    def sample_images(
+        self,
+        reverse_steps=100,
+        num_images=20,
+        clip_denoise=True,
+        use_ema_model=True,
+        labels=None,
+        sampler="ddim_1st",
+        t_start=None,
+    ):
+        """Generate an in-memory batch of random images.
         
-        This is a lightweight variant used for inline evaluation where we only 
+        This is a lightweight variant used for inline evaluation where we only
         need the final samples rather than saving them to disk.
         
         Args:
-            reverse_steps: Steps for reverse diffusion
-            num_images: Number of images to generate
-            clip_denoise: If True, clip predicted x0 during reverse sampling
-                and recompute the implied noise. Defaults to False.
-            gen_inputs: Optional initial samples (if None, uses random noise)
-            use_ema_model: Whether to use EMA network for inference
-            labels: Optional class labels for conditional generation
-            sampler: Reverse sampler. "ddim" keeps the original sampler,
-                "flow_euler" is deterministic DDIM written as an ODE step,
-                and "flow_heun" adds a 2nd-order endpoint correction.
+            reverse_steps: Number of reverse-time transitions.
+            num_images: Number of images to generate.
+            clip_denoise: Whether to threshold each predicted clean image using
+                the fixed or dynamic policy configured on ``diff_util``.
+            use_ema_model: Whether to evaluate the EMA network.
+            labels: Optional class labels for conditional generation.
+            sampler: ``"ddim_1st"`` for standard DDIM or ``"ddim_2nd"`` for
+                deterministic Heun-corrected DDIM. Legacy aliases are accepted.
+            t_start: Starting timestep, or ``None`` for ``self.timesteps``.
             
         Returns:
-            np.ndarray: Generated images as numpy array
+            A float32 NumPy array in ``[0, 1]``.
         """
         sampler = self._normalize_sampler(sampler)
         # prepare initial samples and labels
@@ -369,20 +430,22 @@ class ImageGenerator:
         shape = (num_images, img_h, img_w, img_c)
         samples = tf.random.normal(shape=shape, dtype=tf.float32) 
         labels = self._prepare_labels(num_images, labels)
+        if t_start is None:
+            t_start = self.timesteps
         reverse_timeindex, reverse_nextindex = self.diff_util.make_reverse_time_pairs(
-            self.timesteps, reverse_steps
+            t_start, reverse_steps
         )
          
         for t, s in tqdm.tqdm(zip(reverse_timeindex, reverse_nextindex), total=len(reverse_timeindex)):
-            pred_noise, pred_image = self._denoise_step(
+            pred_noise_t, pred_image_t = self._denoise_step(
                 samples, tf.constant(t, dtype=tf.int32), clip_denoise, use_ema_model, labels
             )
             samples = self._sample_reverse_step(
                 samples,
                 int(t),
                 int(s),
-                pred_noise,
-                pred_image,
+                pred_noise_t,
+                pred_image_t,
                 sampler,
                 clip_denoise,
                 labels,
@@ -402,7 +465,8 @@ class ImageGenerator:
                                  canvas_patch_size=None,
                                  canvas_stride=None,
                                  reverse_steps=100,
-                                 sampler="ddim",
+                                 sampler="ddim_1st",
+                                 t_start=None,
                                  savedir='./',
                                  save_intermediate=False,
                                  save_format='png',
@@ -432,11 +496,14 @@ class ImageGenerator:
             canvas_patch_size: For large canvas generation, size of each patch
             canvas_stride: For large canvas generation, stride between patches
             reverse_steps: Number of reverse steps for diffusion
-            sampler: Reverse sampler: "ddim", "flow_euler", or "flow_heun".
+            sampler: ``"ddim_1st"`` for standard DDIM or ``"ddim_2nd"`` for
+                deterministic Heun-corrected DDIM. Legacy aliases are accepted.
+            t_start: Optional starting timestep for random generation. If None,
+                starts from the scheduler's final timestep.
             savedir: Directory to save generated images
             save_intermediate: Whether to save denoised images at intermediate timesteps
-            clip_denoise: If True, clip predicted x0 during reverse sampling
-                and recompute the implied noise. Defaults to False.
+            clip_denoise: Whether to apply the configured fixed or dynamic
+                threshold to predicted clean images during reverse sampling.
             base_images: Optional base images for inpainting
             labels: Optional class labels
             inpaint_mask: Optional mask for inpainting
@@ -452,8 +519,10 @@ class ImageGenerator:
         Returns:
         """
         sampler = self._normalize_sampler(sampler)
-        if sampler != "ddim" and self_guide_scale > 0.0:
-            raise ValueError("SELF_GUIDE_SCALE is only supported with sampler='ddim'")
+        if sampler != "ddim_1st" and self_guide_scale > 0.0:
+            raise ValueError(
+                "SELF_GUIDE_SCALE is only supported with sampler='ddim_1st'"
+            )
         if batch_size is None:
             batch_size = min(100, num_images)
         logging.info(f"[IMGEN] ===== Image Generation =====")
@@ -463,6 +532,7 @@ class ImageGenerator:
         logging.info(f"[IMGEN] Images per subfolder: {images_per_subfolder}")
         logging.info(f"[IMGEN] Reverse steps: {reverse_steps}")
         logging.info(f"[IMGEN] Sampler: {sampler}")
+        logging.info(f"[IMGEN] T start: {t_start if t_start is not None else self.timesteps}")
         
         # Create main save directory
         Path(savedir).mkdir(parents=True, exist_ok=True)
@@ -492,6 +562,7 @@ class ImageGenerator:
                     canvas_stride=canvas_stride,
                     reverse_steps=reverse_steps,
                     sampler=sampler,
+                    t_start=t_start,
                     savedir=savedir,
                     save_intermediate=save_intermediate,
                     save_format=save_format,
@@ -571,6 +642,7 @@ class ImageGenerator:
                                canvas_stride,
                                reverse_steps,
                                sampler,
+                               t_start,
                                savedir,
                                save_intermediate,
                                save_format,
@@ -616,10 +688,13 @@ class ImageGenerator:
         batch_labels = self._prepare_labels(batch_size, labels)
         
         # Handle different generation tasks
-        t_start = self.timesteps
+        if t_start is None:
+            t_start = self.timesteps
+        t_start = int(t_start)
         if gen_task == 'img2img':
             assert base_images is not None
-            t_start = int(self.timesteps * sdedit_strength) if sdedit_strength is not None else int(self.timesteps * 0.5)
+            if t_start == self.timesteps:
+                t_start = int(self.timesteps * sdedit_strength) if sdedit_strength is not None else int(self.timesteps * 0.5)
             samples, _ = self.diff_util.q_sample(base_images, tf.fill((batch_size,), t_start), samples)
         
         if gen_task == 'channel_inpaint':
@@ -672,7 +747,7 @@ class ImageGenerator:
         reverse_timeindex, reverse_nextindex = self.diff_util.make_reverse_time_pairs(
             t_start, reverse_steps
         )
-        eps_prev = None
+        previous_pred_noise = None
         
         logging.debug(f"[IMGEN] Starting reverse diffusion with {len(reverse_timeindex)} steps")
         
@@ -681,7 +756,9 @@ class ImageGenerator:
             # ex: 
             # t = [1000, 990, 980, ..., 10] for stride=10, steps=100
             # s = [990, 980, ..., 0]
-            tt = tf.cast(tf.fill((tf.shape(samples)[0],), t), tf.int32) # [B,]
+            t_batch = tf.cast(
+                tf.fill((tf.shape(samples)[0],), t), tf.int32
+            )
             
             if inpaint_mask is not None:
                 """
@@ -699,12 +776,14 @@ class ImageGenerator:
                 # reference paper: https://arxiv.org/abs/2201.09865 "RePaint: Inpainting using Denoising Diffusion Probabilistic Models"
                 """
                 if _renoise_base_images:
-                    base_images_t, _ = self.diff_util.q_sample(base_images, tt, noise0)
+                    base_images_t, _ = self.diff_util.q_sample(
+                        base_images, t_batch, noise0
+                    )
                     samples = samples * inpaint_mask + base_images_t * (1 - inpaint_mask)
                 else:
                     samples = samples * inpaint_mask + base_images * (1 - inpaint_mask)
             
-            eps_t, pred_image = self._denoise_for_task(
+            pred_noise_t, pred_image_t = self._denoise_for_task(
                 samples,
                 int(t),
                 clip_denoise,
@@ -716,17 +795,26 @@ class ImageGenerator:
             )
             
             if self_guide_scale > 0.0:
-                eps_guide = eps_t + self_guide_scale * (eps_prev - eps_t) if eps_prev is not None else eps_t
-                ss = tf.cast(tf.fill((tf.shape(samples)[0],), s), tf.int32) # [B,]
-                samples = self.diff_util.p_sample_ddim(pred_image, eps_guide, tt, ss)
-                eps_prev = eps_t
+                guided_pred_noise = (
+                    pred_noise_t
+                    + self_guide_scale * (previous_pred_noise - pred_noise_t)
+                    if previous_pred_noise is not None
+                    else pred_noise_t
+                )
+                s_batch = tf.cast(
+                    tf.fill((tf.shape(samples)[0],), s), tf.int32
+                )
+                samples = self.diff_util.p_sample_ddim(
+                    pred_image_t, guided_pred_noise, t_batch, s_batch
+                )
+                previous_pred_noise = pred_noise_t
             else:
                 samples = self._sample_reverse_step(
                     samples,
                     int(t),
                     int(s),
-                    eps_t,
-                    pred_image,
+                    pred_noise_t,
+                    pred_image_t,
                     sampler,
                     clip_denoise,
                     batch_labels,

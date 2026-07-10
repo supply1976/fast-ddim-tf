@@ -275,7 +275,8 @@ class ImageGenConfig:
     num_gen_images: int = 20
     batch_size: Optional[int] = None
     reverse_steps: int = 100
-    sampler: str = "ddim"
+    sampler: str = "ddim_1st"
+    t_start: Optional[int] = None
     ddim_eta: float = 0.0
     random_seed: Optional[int] = None
     target_image_size: Union[int, Tuple[int, int]] = None # int or (int, int)
@@ -293,6 +294,9 @@ class ImageGenConfig:
     bbox_to_inpaint: bool = True
     external_input: Optional[str] = None
     clip_denoise: bool = True
+    clip_denoise_mode: str = 'fixed'
+    dynamic_threshold_percentile: float = 0.995
+    dynamic_threshold_max: Optional[float] = None
     self_guide_scale: float = 0.0
     sdedit_strength: float = 0.5  # for img2img task only, strength of diffusion (0-1)
     overlap_dir: Optional[str] = None  # for overlap_inpaint task only, options: 'north', 'east', 'south', 'west'
@@ -305,7 +309,8 @@ class ImageGenConfig:
         num_gen_images: int = 20,
         batch_size: Optional[int] = None,
         reverse_steps: int = 100,
-        sampler: str = "ddim",
+        sampler: str = "ddim_1st",
+        t_start: Optional[int] = None,
         ddim_eta: float = 0.0,
         random_seed: Optional[int] = None,
         target_image_size: Union[int, Tuple[int, int]] = None,
@@ -321,6 +326,9 @@ class ImageGenConfig:
         bbox_to_inpaint: bool = True,
         external_input: Optional[str] = None,
         clip_denoise: bool = True,
+        clip_denoise_mode: str = 'fixed',
+        dynamic_threshold_percentile: float = 0.995,
+        dynamic_threshold_max: Optional[float] = None,
         self_guide_scale: float = 0.0,
         sdedit_strength: float = 0.5,
         overlap_dir: Optional[str] = None,
@@ -332,6 +340,7 @@ class ImageGenConfig:
         self.batch_size = batch_size
         self.reverse_steps = reverse_steps
         self.sampler = sampler
+        self.t_start = t_start
         self.ddim_eta = ddim_eta
         self.random_seed = random_seed
         self.target_image_size = target_image_size
@@ -347,6 +356,9 @@ class ImageGenConfig:
         self.bbox_to_inpaint = bbox_to_inpaint
         self.external_input = external_input
         self.clip_denoise = clip_denoise
+        self.clip_denoise_mode = clip_denoise_mode
+        self.dynamic_threshold_percentile = dynamic_threshold_percentile
+        self.dynamic_threshold_max = dynamic_threshold_max
         self.self_guide_scale = self_guide_scale
         self.sdedit_strength = sdedit_strength
         self.overlap_dir = overlap_dir
@@ -480,7 +492,8 @@ class ConfigManager:
             num_gen_images    = imgen_dict.get('NUM_GEN_IMAGES', 20),
             batch_size        = imgen_dict.get('BATCH_SIZE'),
             reverse_steps     = imgen_dict.get('REVERSE_STEPS', 100),
-            sampler           = imgen_dict.get('SAMPLER', 'ddim'),
+            sampler           = imgen_dict.get('SAMPLER', 'ddim_1st'),
+            t_start           = imgen_dict.get('T_START'),
             canvas_shape      = imgen_dict.get('CANVAS_SHAPE'),
             canvas_patch_size = imgen_dict.get('CANVAS_PATCH_SIZE'),
             canvas_stride     = imgen_dict.get('CANVAS_STRIDE'),
@@ -490,6 +503,9 @@ class ConfigManager:
             self_guide_scale  = imgen_dict.get('_SELF_GUIDE_SCALE', 0.0),
             sdedit_strength   = imgen_dict.get('_SDEDIT_STRENGTH', 0.5),
             clip_denoise      = imgen_dict.get('CLIP_DENOISE', True),
+            clip_denoise_mode = imgen_dict.get('CLIP_DENOISE_MODE', 'fixed'),
+            dynamic_threshold_percentile = imgen_dict.get('DYNAMIC_THRESHOLD_PERCENTILE', 0.995),
+            dynamic_threshold_max = imgen_dict.get('DYNAMIC_THRESHOLD_MAX'),
             save_dir            = imgen_outputs_dict.get('SAVE_DIR'),
             save_intermediate   = imgen_outputs_dict.get('SAVE_INTERMEDIATE', False),
             save_format         = imgen_outputs_dict.get('SAVE_FORMAT', 'png'),
@@ -547,7 +563,10 @@ class ModelBuilder:
     @staticmethod
     def create_diffusion_utility(diffusion_scheduler_config: DiffusionSchedulerConfig, 
                                  reverse_steps=None, ddim_eta: float = 0.0, 
-                                 clip_denoise: bool = False) -> DiffusionUtility:
+                                 clip_denoise: bool = False,
+                                 clip_denoise_mode: str = 'fixed',
+                                 dynamic_threshold_percentile: float = 0.995,
+                                 dynamic_threshold_max: Optional[float] = None) -> DiffusionUtility:
         """Create diffusion utility with common parameters."""
         if reverse_steps is None:
             reverse_steps = diffusion_scheduler_config.timesteps
@@ -557,7 +576,10 @@ class ModelBuilder:
             pred_type=diffusion_scheduler_config.pred_type,
             reverse_steps=reverse_steps,
             ddim_eta=ddim_eta, 
-            clip_denoise=clip_denoise
+            clip_denoise=clip_denoise,
+            clip_denoise_mode=clip_denoise_mode,
+            dynamic_threshold_percentile=dynamic_threshold_percentile,
+            dynamic_threshold_max=dynamic_threshold_max,
         )
     
     @staticmethod
@@ -1055,6 +1077,9 @@ class ImageGenerator:
             reverse_steps=self.imgen_config.reverse_steps,
             ddim_eta=self.imgen_config.ddim_eta,
             clip_denoise=self.imgen_config.clip_denoise,
+            clip_denoise_mode=self.imgen_config.clip_denoise_mode,
+            dynamic_threshold_percentile=self.imgen_config.dynamic_threshold_percentile,
+            dynamic_threshold_max=self.imgen_config.dynamic_threshold_max,
         ) 
         
         self.network_config.image_size = self.imgen_config.target_image_size
@@ -1088,6 +1113,7 @@ class ImageGenerator:
             batch_size=self.imgen_config.batch_size,
             reverse_steps=self.imgen_config.reverse_steps,
             sampler=self.imgen_config.sampler,
+            t_start=self.imgen_config.t_start,
             canvas_shape=self.imgen_config.canvas_shape,
             canvas_patch_size=self.imgen_config.canvas_patch_size,
             canvas_stride=self.imgen_config.canvas_stride,
@@ -1124,10 +1150,14 @@ class ImageGenerator:
         logging.info(f"[IMGEN] class label: {self.imgen_config.class_label}")
         logging.info(f"[IMGEN] Model Predict Type: {self.diffusion_scheduler_config.pred_type}")
         logging.info(f"[IMGEN] Sampler: {self.imgen_config.sampler}")
+        logging.info(f"[IMGEN] T start: {self.imgen_config.t_start}")
         logging.info(f"[IMGEN] DDIM eta = {self.imgen_config.ddim_eta}")
         logging.info(f"[IMGEN] self guide scale = {self.imgen_config.self_guide_scale}")
         logging.info(f"[IMGEN] Set Random Seed: {self.imgen_config.random_seed}")
         logging.info(f"[IMGEN] clip_denoise: {self.imgen_config.clip_denoise}")
+        logging.info(f"[IMGEN] clip_denoise_mode: {self.imgen_config.clip_denoise_mode}")
+        logging.info(f"[IMGEN] dynamic_threshold_percentile: {self.imgen_config.dynamic_threshold_percentile}")
+        logging.info(f"[IMGEN] dynamic_threshold_max: {self.imgen_config.dynamic_threshold_max}")
         logging.info(f"[IMGEN] hostname: {os.uname().nodename}")
         logging.info(f"[IMGEN] TF version: {tf.__version__}")
     
@@ -1292,7 +1322,8 @@ IMAGE_GENERATION:
     NUM_GEN_IMAGES: 20
     BATCH_SIZE: null
     REVERSE_STEPS: 100
-    SAMPLER: ddim              # ddim | flow_euler | flow_heun
+    SAMPLER: ddim_1st          # ddim_1st | ddim_2nd; legacy aliases remain accepted
+    T_START: null              # optional starting timestep, e.g. 999 or 990 for cosine flow solvers
     CANVAS_SHAPE: null         # [H, W] for canvas_gen
     CANVAS_PATCH_SIZE: null
     CANVAS_STRIDE: null
@@ -1301,7 +1332,10 @@ IMAGE_GENERATION:
     TARGET_IMAGE_SIZE: null    # int or [H, W]
     _SELF_GUIDE_SCALE: 0.0
     _SDEDIT_STRENGTH: 0.5
-    CLIP_DENOISE: true       # inference only; clip predicted x0 during reverse sampling
+    CLIP_DENOISE: true       # inference only; project predicted x0 during reverse sampling
+    CLIP_DENOISE_MODE: fixed # fixed | dynamic
+    DYNAMIC_THRESHOLD_PERCENTILE: 0.995
+    DYNAMIC_THRESHOLD_MAX: null
     OUTPUT_OPTIONS:
         SAVE_DIR: null
         SAVE_INTERMEDIATE: false

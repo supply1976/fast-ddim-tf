@@ -24,10 +24,33 @@ class DiffusionUtility:
         ddim_eta (float): DDIM determinism parameter (0=deterministic, 1=stochastic)
     """
 
-    def __init__(self, b0=0.1, b1=20.0, scheduler='linear', timesteps=1000,
-                 pred_type='velocity', reverse_steps=1000, ddim_eta=0.0, clip_denoise=False):
+    def __init__(
+        self,
+        b0=0.1,
+        b1=20.0,
+        scheduler='linear',
+        timesteps=1000,
+        pred_type='velocity',
+        reverse_steps=1000,
+        ddim_eta=0.0,
+        clip_denoise=False,
+        clip_denoise_mode='fixed',
+        dynamic_threshold_percentile=0.995,
+        dynamic_threshold_max=None,
+    ):
         self._validate_params(timesteps, reverse_steps, pred_type)
-        self._set_params(b0, b1, scheduler, timesteps, pred_type, reverse_steps, ddim_eta)
+        self._set_params(
+            b0,
+            b1,
+            scheduler,
+            timesteps,
+            pred_type,
+            reverse_steps,
+            ddim_eta,
+            clip_denoise_mode,
+            dynamic_threshold_percentile,
+            dynamic_threshold_max,
+        )
         self.time_samples = np.linspace(0, 1, timesteps + 1, dtype=np.float64)
         self.clip_denoise = clip_denoise
         
@@ -48,8 +71,28 @@ class DiffusionUtility:
         if pred_type not in ['noise', 'image', 'velocity']:
             raise ValueError(f"pred_type must be one of ['noise', 'image', 'velocity'], got {pred_type}")
     
-    def _set_params(self, b0, b1, scheduler, timesteps, pred_type, reverse_steps, ddim_eta):
+    def _set_params(
+        self,
+        b0,
+        b1,
+        scheduler,
+        timesteps,
+        pred_type,
+        reverse_steps,
+        ddim_eta,
+        clip_denoise_mode,
+        dynamic_threshold_percentile,
+        dynamic_threshold_max,
+    ):
         """Set instance parameters."""
+        clip_denoise_mode = str(clip_denoise_mode).lower()
+        if clip_denoise_mode not in ['fixed', 'dynamic']:
+            raise ValueError("clip_denoise_mode must be one of ['fixed', 'dynamic']")
+        if not 0.0 < float(dynamic_threshold_percentile) <= 1.0:
+            raise ValueError("dynamic_threshold_percentile must be in (0, 1]")
+        if dynamic_threshold_max is not None and float(dynamic_threshold_max) < 1.0:
+            raise ValueError("dynamic_threshold_max must be None or >= 1.0")
+
         self.b0 = b0
         self.b1 = b1
         self.scheduler = scheduler
@@ -59,6 +102,11 @@ class DiffusionUtility:
         self.ddim_eta = ddim_eta
         self.CLIP_MIN = -1.0
         self.CLIP_MAX = 1.0
+        self.clip_denoise_mode = clip_denoise_mode
+        self.dynamic_threshold_percentile = float(dynamic_threshold_percentile)
+        self.dynamic_threshold_max = (
+            None if dynamic_threshold_max is None else float(dynamic_threshold_max)
+        )
     
     def _compute_alphas(self):
         """Compute alpha values based on the chosen scheduler.
@@ -184,6 +232,28 @@ class DiffusionUtility:
             raise ValueError("Reverse timestep grid must be strictly decreasing")
         return time_points[:-1], time_points[1:]
 
+    def apply_denoise_threshold(self, pred_image):
+        """Project predicted x0 using fixed clipping or dynamic thresholding."""
+        if self.clip_denoise_mode == 'fixed':
+            return tf.clip_by_value(pred_image, self.CLIP_MIN, self.CLIP_MAX)
+
+        flat = tf.reshape(pred_image, (tf.shape(pred_image)[0], -1))
+        abs_flat = tf.abs(flat)
+        sorted_abs = tf.sort(abs_flat, axis=1)
+        num_values = tf.shape(sorted_abs)[1]
+        rank = tf.cast(
+            tf.math.ceil(self.dynamic_threshold_percentile * tf.cast(num_values, tf.float32)),
+            tf.int32,
+        )
+        rank = tf.clip_by_value(rank - 1, 0, num_values - 1)
+        threshold = tf.gather(sorted_abs, rank, axis=1)
+        threshold = tf.maximum(threshold, 1.0)
+        if self.dynamic_threshold_max is not None:
+            threshold = tf.minimum(threshold, self.dynamic_threshold_max)
+        threshold = tf.reshape(threshold, (-1, 1, 1, 1))
+        pred_image = tf.clip_by_value(pred_image, -threshold, threshold)
+        return pred_image / threshold
+
     def get_pred_components(self, x_t, t, pred_type, y_pred, clip_denoise):
         """
         Convert model prediction to noise, image, and velocity components.
@@ -193,7 +263,8 @@ class DiffusionUtility:
             t: Timestep tensor
             pred_type: Type of prediction ('noise', 'image', 'velocity')
             y_pred: Model prediction
-            clip_denoise: If True, clip predicted clean image to [-1, 1].
+            clip_denoise: If True, project predicted clean image using
+                ``clip_denoise_mode``.
                 The model-implied noise is kept unchanged; recomputing it from
                 clipped x0 can distort the deterministic DDIM/ODE direction.
         
@@ -225,7 +296,7 @@ class DiffusionUtility:
         # Keep the model-implied noise as the reverse direction, especially for
         # deterministic DDIM and ODE solvers where eta=0.
         if clip_denoise:
-            pred_image = tf.clip_by_value(pred_image, self.CLIP_MIN, self.CLIP_MAX)
+            pred_image = self.apply_denoise_threshold(pred_image)
 
         return pred_noise, pred_image
 
@@ -296,6 +367,9 @@ class DiffusionUtility:
             'pred_type': self.pred_type,
             'reverse_steps': self.reverse_steps,
             'ddim_eta': self.ddim_eta,
+            'clip_denoise_mode': self.clip_denoise_mode,
+            'dynamic_threshold_percentile': self.dynamic_threshold_percentile,
+            'dynamic_threshold_max': self.dynamic_threshold_max,
         }
 
 
