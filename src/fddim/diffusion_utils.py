@@ -204,11 +204,20 @@ class DiffusionUtility:
         v_t = mu_t * noise - sigma_t * x_0
         return (x_t, v_t)
 
-    def make_reverse_time_pairs(self, t_start=None, reverse_steps=None):
-        """Return integer reverse timestep pairs without requiring divisibility.
+    def make_reverse_time_pairs(
+        self,
+        t_start=None,
+        reverse_steps=None,
+        timestep_spacing='uniform',
+    ):
+        """Return strictly decreasing integer reverse timestep pairs.
 
         The returned arrays have length ``reverse_steps`` and represent
-        transitions ``t_values[i] -> s_values[i]`` with ``t > s``.
+        transitions ``t_values[i] -> s_values[i]`` with ``t > s``. Uniform
+        spacing is uniform in the model's discrete time labels. Log-SNR spacing
+        chooses the positive model-evaluation timesteps approximately uniformly
+        in ``lambda = log(mu) - log(sigma)`` and appends timestep zero only as
+        the final update destination.
         """
         if t_start is None:
             t_start = self.timesteps
@@ -223,14 +232,67 @@ class DiffusionUtility:
         if reverse_steps > t_start:
             raise ValueError("reverse_steps must be <= t_start")
 
-        time_points = np.rint(
-            np.linspace(t_start, 0, reverse_steps + 1, dtype=np.float64)
-        ).astype(np.int32)
-        time_points[0] = np.int32(t_start)
-        time_points[-1] = np.int32(0)
+        spacing_aliases = {
+            'uniform': 'uniform',
+            'time_uniform': 'uniform',
+            'log_snr': 'log_snr',
+            'logsnr': 'log_snr',
+        }
+        spacing_key = str(timestep_spacing).strip().lower()
+        if spacing_key not in spacing_aliases:
+            raise ValueError(
+                "timestep_spacing must be 'uniform' or 'log_snr'"
+            )
+
+        if spacing_aliases[spacing_key] == 'uniform':
+            time_points = np.rint(
+                np.linspace(t_start, 0, reverse_steps + 1, dtype=np.float64)
+            ).astype(np.int32)
+            time_points[0] = np.int32(t_start)
+            time_points[-1] = np.int32(0)
+        else:
+            time_points = self._make_log_snr_time_points(t_start, reverse_steps)
+
         if np.any(np.diff(time_points) >= 0):
             raise ValueError("Reverse timestep grid must be strictly decreasing")
         return time_points[:-1], time_points[1:]
+
+    def _make_log_snr_time_points(self, t_start, reverse_steps):
+        """Map a uniform half-log-SNR grid onto discrete model timesteps."""
+        if reverse_steps == 1:
+            return np.array([t_start, 0], dtype=np.int32)
+
+        mu = np.sqrt(self.alphas)
+        sigma = np.sqrt(np.maximum(1.0 - self.alphas, 0.0))
+        positive_timesteps = np.arange(t_start, 0, -1, dtype=np.int32)
+        log_snr = (
+            np.log(np.maximum(mu[positive_timesteps], 1.0e-30))
+            - np.log(np.maximum(sigma[positive_timesteps], 1.0e-30))
+        )
+        target_log_snr = np.linspace(
+            log_snr[0], log_snr[-1], reverse_steps, dtype=np.float64
+        )
+        interpolated_timesteps = np.interp(
+            target_log_snr,
+            log_snr,
+            positive_timesteps.astype(np.float64),
+        )
+        model_timesteps = np.rint(interpolated_timesteps).astype(np.int32)
+        model_timesteps[0] = np.int32(t_start)
+        model_timesteps[-1] = np.int32(1)
+
+        # Rounding can map adjacent log-SNR targets to the same label. Keep the
+        # closest feasible label while reserving enough labels to reach 1.
+        for index in range(1, reverse_steps - 1):
+            largest = model_timesteps[index - 1] - 1
+            smallest = reverse_steps - index
+            model_timesteps[index] = np.clip(
+                model_timesteps[index], smallest, largest
+            )
+
+        return np.concatenate(
+            [model_timesteps, np.array([0], dtype=np.int32)]
+        )
 
     def apply_denoise_threshold(self, pred_image):
         """Project predicted x0 using fixed clipping or dynamic thresholding."""

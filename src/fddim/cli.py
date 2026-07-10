@@ -276,6 +276,7 @@ class ImageGenConfig:
     batch_size: Optional[int] = None
     reverse_steps: int = 100
     sampler: str = "ddim_1st"
+    timestep_spacing: str = "uniform"
     t_start: Optional[int] = None
     ddim_eta: float = 0.0
     random_seed: Optional[int] = None
@@ -310,6 +311,7 @@ class ImageGenConfig:
         batch_size: Optional[int] = None,
         reverse_steps: int = 100,
         sampler: str = "ddim_1st",
+        timestep_spacing: str = "uniform",
         t_start: Optional[int] = None,
         ddim_eta: float = 0.0,
         random_seed: Optional[int] = None,
@@ -340,6 +342,7 @@ class ImageGenConfig:
         self.batch_size = batch_size
         self.reverse_steps = reverse_steps
         self.sampler = sampler
+        self.timestep_spacing = timestep_spacing
         self.t_start = t_start
         self.ddim_eta = ddim_eta
         self.random_seed = random_seed
@@ -493,6 +496,7 @@ class ConfigManager:
             batch_size        = imgen_dict.get('BATCH_SIZE'),
             reverse_steps     = imgen_dict.get('REVERSE_STEPS', 100),
             sampler           = imgen_dict.get('SAMPLER', 'ddim_1st'),
+            timestep_spacing  = imgen_dict.get('TIMESTEP_SPACING', 'uniform'),
             t_start           = imgen_dict.get('T_START'),
             canvas_shape      = imgen_dict.get('CANVAS_SHAPE'),
             canvas_patch_size = imgen_dict.get('CANVAS_PATCH_SIZE'),
@@ -1113,6 +1117,7 @@ class ImageGenerator:
             batch_size=self.imgen_config.batch_size,
             reverse_steps=self.imgen_config.reverse_steps,
             sampler=self.imgen_config.sampler,
+            timestep_spacing=self.imgen_config.timestep_spacing,
             t_start=self.imgen_config.t_start,
             canvas_shape=self.imgen_config.canvas_shape,
             canvas_patch_size=self.imgen_config.canvas_patch_size,
@@ -1150,6 +1155,7 @@ class ImageGenerator:
         logging.info(f"[IMGEN] class label: {self.imgen_config.class_label}")
         logging.info(f"[IMGEN] Model Predict Type: {self.diffusion_scheduler_config.pred_type}")
         logging.info(f"[IMGEN] Sampler: {self.imgen_config.sampler}")
+        logging.info(f"[IMGEN] Timestep spacing: {self.imgen_config.timestep_spacing}")
         logging.info(f"[IMGEN] T start: {self.imgen_config.t_start}")
         logging.info(f"[IMGEN] DDIM eta = {self.imgen_config.ddim_eta}")
         logging.info(f"[IMGEN] self guide scale = {self.imgen_config.self_guide_scale}")
@@ -1322,8 +1328,9 @@ IMAGE_GENERATION:
     NUM_GEN_IMAGES: 20
     BATCH_SIZE: null
     REVERSE_STEPS: 100
-    SAMPLER: ddim_1st          # ddim_1st | ddim_2nd; legacy aliases remain accepted
-    T_START: null              # optional starting timestep, e.g. 999 or 990 for cosine flow solvers
+    SAMPLER: ddim_1st          # ddim_1st | ddim_2nd | dpmpp_2m
+    TIMESTEP_SPACING: uniform  # uniform | log_snr
+    T_START: null              # optional starting timestep, e.g. 990 for cosine log-SNR sampling
     CANVAS_SHAPE: null         # [H, W] for canvas_gen
     CANVAS_PATCH_SIZE: null
     CANVAS_STRIDE: null

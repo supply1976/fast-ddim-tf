@@ -1,6 +1,7 @@
 import gc
 import logging
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
@@ -9,15 +10,23 @@ import tqdm
 from PIL import Image
 
 
+@dataclass
+class _DPMpp2MState:
+    """History required by the second-order multistep data solver."""
+
+    previous_pred_image: tf.Tensor | None = None
+    previous_timestep: int | None = None
+
+
 class ImageGenerator:
     """Run inference-only reverse diffusion for image generation tasks.
 
     The generator owns sampler selection, model evaluation, inference-time
     thresholding of predicted clean images, and task-specific conditioning. It
-    supports first-order DDIM and a deterministic second-order DDIM/Heun
-    corrector. Both solvers work with random generation, patch-based canvas
-    generation, image-to-image generation, and the inpainting variants handled
-    by :meth:`generate_images_and_save`.
+    supports first-order DDIM, a deterministic second-order DDIM/Heun
+    corrector, and DPM-Solver++ 2M. All solvers work with random generation,
+    patch-based canvas generation, image-to-image generation, and the inpainting
+    variants handled by :meth:`generate_images_and_save`.
 
     Predicted noise is never modified by thresholding. When ``clip_denoise`` is
     enabled, only the predicted clean image (``pred_image`` or x0) is projected
@@ -44,6 +53,12 @@ class ImageGenerator:
         "ddim_heun": "ddim_2nd",
         "heun": "ddim_2nd",
         "flow_heun": "ddim_2nd",
+        "dpmpp_2m": "dpmpp_2m",
+        "dpmpp2m": "dpmpp_2m",
+        "dpm-solver++_2m": "dpmpp_2m",
+        "dpm_solver++_2m": "dpmpp_2m",
+        "dpmsolver++_2m": "dpmpp_2m",
+        "dpm_solver_pp_2m": "dpmpp_2m",
     }
     
     def __init__(self, diff_util, network, ema_network, timesteps, num_classes=None):
@@ -63,13 +78,26 @@ class ImageGenerator:
         sampler_key = sampler.strip().lower()
         if sampler_key not in self._SAMPLER_ALIASES:
             raise ValueError(
-                "sampler must be 'ddim_1st' or 'ddim_2nd' "
+                "sampler must be 'ddim_1st', 'ddim_2nd', or 'dpmpp_2m' "
                 "('ddim', 'flow_euler', and 'flow_heun' remain aliases)"
             )
         normalized_sampler = self._SAMPLER_ALIASES[sampler_key]
-        if normalized_sampler == "ddim_2nd" and self.diff_util.ddim_eta != 0.0:
-            raise ValueError("ddim_2nd is deterministic and requires DDIM_ETA: 0.0")
+        if (
+            normalized_sampler in {"ddim_2nd", "dpmpp_2m"}
+            and self.diff_util.ddim_eta != 0.0
+        ):
+            raise ValueError(
+                f"{normalized_sampler} is deterministic and requires "
+                "DDIM_ETA: 0.0"
+            )
         return normalized_sampler
+
+    @staticmethod
+    def _create_sampler_state(sampler):
+        """Create per-batch history for samplers that require it."""
+        if sampler == "dpmpp_2m":
+            return _DPMpp2MState()
+        return None
 
     def _threshold_pred_image(self, pred_image, enabled):
         """Apply the configured fixed or dynamic threshold to predicted x0."""
@@ -296,8 +324,9 @@ class ImageGenerator:
         canvas_patch_size=None,
         canvas_stride=None,
         use_ema_model=True,
+        sampler_state=None,
     ):
-        """Advance one reverse-time step with first- or second-order DDIM.
+        """Advance one reverse-time step with the selected deterministic solver.
 
         ``ddim_1st`` performs the standard DDIM update from ``t`` to ``s``.
         ``ddim_2nd`` first predicts ``x_s`` with that update, evaluates the
@@ -306,9 +335,25 @@ class ImageGenerator:
         clean-image estimate is reconstructed at ``t`` and passed through the
         same fixed/dynamic threshold policy as the first-order estimate.
 
+        ``dpmpp_2m`` integrates the thresholded data prediction directly in
+        half-log-SNR. It uses the current and previous ``pred_image`` values for
+        a second-order multistep update, falling back to first order for startup
+        and the final transition to timestep zero.
+
         The endpoint model evaluation is skipped for ``s == 0`` because the
         clean endpoint has no subsequent integration interval.
         """
+        if sampler == "dpmpp_2m":
+            if not isinstance(sampler_state, _DPMpp2MState):
+                raise ValueError("dpmpp_2m requires persistent sampler state")
+            return self._sample_dpmpp_2m_step(
+                x_t,
+                t,
+                s,
+                pred_image_t,
+                sampler_state,
+            )
+
         t_batch = tf.cast(tf.fill((tf.shape(x_t)[0],), t), tf.int32)
         s_batch = tf.cast(tf.fill((tf.shape(x_t)[0],), s), tf.int32)
         x_s_predictor = self.diff_util.p_sample_ddim(
@@ -342,6 +387,84 @@ class ImageGenerator:
             t_batch,
             s_batch,
         )
+
+    def _sample_dpmpp_2m_step(
+        self,
+        x_t,
+        t,
+        s,
+        pred_image_t,
+        state,
+    ):
+        """Apply one midpoint-form DPM-Solver++ second-order multistep update.
+
+        The implementation follows the official DPM-Solver++ 2M equation with
+        ``lambda = log(mu) - log(sigma)``. The first step bootstraps with the
+        first-order DPM-Solver++ update, which is deterministic DDIM. Timestep
+        zero has infinite log-SNR, so the final update also uses first order and
+        returns the current data prediction directly.
+        """
+        use_first_order = (
+            state.previous_pred_image is None
+            or state.previous_timestep is None
+            or int(s) == 0
+        )
+        if use_first_order:
+            x_s = self._sample_dpmpp_first_order(x_t, t, s, pred_image_t)
+        else:
+            if state.previous_timestep <= int(t):
+                raise ValueError(
+                    "dpmpp_2m history must contain a timestep greater than t"
+                )
+
+            lambda_previous = self._half_log_snr(state.previous_timestep)
+            lambda_t = self._half_log_snr(t)
+            lambda_s = self._half_log_snr(s)
+            h_previous = lambda_t - lambda_previous
+            h = lambda_s - lambda_t
+            step_ratio = h_previous / h
+            first_derivative = (
+                pred_image_t - state.previous_pred_image
+            ) / step_ratio
+
+            sigma_t = tf.gather(self.diff_util.sigma_coefs, int(t))
+            sigma_s = tf.gather(self.diff_util.sigma_coefs, int(s))
+            mu_s = tf.gather(self.diff_util.mu_coefs, int(s))
+            phi_1 = tf.math.expm1(-h)
+            x_s = (
+                (sigma_s / sigma_t) * x_t
+                - mu_s * phi_1 * pred_image_t
+                - 0.5 * mu_s * phi_1 * first_derivative
+            )
+
+        state.previous_pred_image = pred_image_t
+        state.previous_timestep = int(t)
+        return x_s
+
+    def _sample_dpmpp_first_order(self, x_t, t, s, pred_image_t):
+        """Apply the first-order DPM-Solver++ update from ``t`` to ``s``."""
+        if int(s) == 0:
+            return pred_image_t
+
+        lambda_t = self._half_log_snr(t)
+        lambda_s = self._half_log_snr(s)
+        h = lambda_s - lambda_t
+        sigma_t = tf.gather(self.diff_util.sigma_coefs, int(t))
+        sigma_s = tf.gather(self.diff_util.sigma_coefs, int(s))
+        mu_s = tf.gather(self.diff_util.mu_coefs, int(s))
+        return (
+            (sigma_s / sigma_t) * x_t
+            - mu_s * tf.math.expm1(-h) * pred_image_t
+        )
+
+    def _half_log_snr(self, timestep):
+        """Return ``log(mu_t) - log(sigma_t)`` for a positive timestep."""
+        timestep = int(timestep)
+        if timestep <= 0:
+            raise ValueError("half-log-SNR is finite only for timesteps > 0")
+        mu_t = tf.gather(self.diff_util.mu_coefs, timestep)
+        sigma_t = tf.gather(self.diff_util.sigma_coefs, timestep)
+        return tf.math.log(mu_t) - tf.math.log(sigma_t)
     
     def _prepare_overlap_inpaint(self, base_images, overlap_dir, overlap_size):
         """
@@ -404,6 +527,7 @@ class ImageGenerator:
         labels=None,
         sampler="ddim_1st",
         t_start=None,
+        timestep_spacing="uniform",
     ):
         """Generate an in-memory batch of random images.
         
@@ -417,9 +541,11 @@ class ImageGenerator:
                 the fixed or dynamic policy configured on ``diff_util``.
             use_ema_model: Whether to evaluate the EMA network.
             labels: Optional class labels for conditional generation.
-            sampler: ``"ddim_1st"`` for standard DDIM or ``"ddim_2nd"`` for
-                deterministic Heun-corrected DDIM. Legacy aliases are accepted.
+            sampler: ``"ddim_1st"``, ``"ddim_2nd"``, or ``"dpmpp_2m"``.
+                Legacy aliases are accepted.
             t_start: Starting timestep, or ``None`` for ``self.timesteps``.
+            timestep_spacing: ``"uniform"`` for uniform discrete timesteps or
+                ``"log_snr"`` for approximately uniform half-log-SNR steps.
             
         Returns:
             A float32 NumPy array in ``[0, 1]``.
@@ -433,8 +559,9 @@ class ImageGenerator:
         if t_start is None:
             t_start = self.timesteps
         reverse_timeindex, reverse_nextindex = self.diff_util.make_reverse_time_pairs(
-            t_start, reverse_steps
+            t_start, reverse_steps, timestep_spacing
         )
+        sampler_state = self._create_sampler_state(sampler)
          
         for t, s in tqdm.tqdm(zip(reverse_timeindex, reverse_nextindex), total=len(reverse_timeindex)):
             pred_noise_t, pred_image_t = self._denoise_step(
@@ -450,6 +577,7 @@ class ImageGenerator:
                 clip_denoise,
                 labels,
                 use_ema_model=use_ema_model,
+                sampler_state=sampler_state,
             )
         # final postprocessing
         samples = samples.numpy()
@@ -467,6 +595,7 @@ class ImageGenerator:
                                  reverse_steps=100,
                                  sampler="ddim_1st",
                                  t_start=None,
+                                 timestep_spacing="uniform",
                                  savedir='./',
                                  save_intermediate=False,
                                  save_format='png',
@@ -496,10 +625,11 @@ class ImageGenerator:
             canvas_patch_size: For large canvas generation, size of each patch
             canvas_stride: For large canvas generation, stride between patches
             reverse_steps: Number of reverse steps for diffusion
-            sampler: ``"ddim_1st"`` for standard DDIM or ``"ddim_2nd"`` for
-                deterministic Heun-corrected DDIM. Legacy aliases are accepted.
+            sampler: ``"ddim_1st"``, ``"ddim_2nd"``, or ``"dpmpp_2m"``.
+                Legacy aliases are accepted.
             t_start: Optional starting timestep for random generation. If None,
                 starts from the scheduler's final timestep.
+            timestep_spacing: ``"uniform"`` or ``"log_snr"``.
             savedir: Directory to save generated images
             save_intermediate: Whether to save denoised images at intermediate timesteps
             clip_denoise: Whether to apply the configured fixed or dynamic
@@ -532,6 +662,7 @@ class ImageGenerator:
         logging.info(f"[IMGEN] Images per subfolder: {images_per_subfolder}")
         logging.info(f"[IMGEN] Reverse steps: {reverse_steps}")
         logging.info(f"[IMGEN] Sampler: {sampler}")
+        logging.info(f"[IMGEN] Timestep spacing: {timestep_spacing}")
         logging.info(f"[IMGEN] T start: {t_start if t_start is not None else self.timesteps}")
         
         # Create main save directory
@@ -563,6 +694,7 @@ class ImageGenerator:
                     reverse_steps=reverse_steps,
                     sampler=sampler,
                     t_start=t_start,
+                    timestep_spacing=timestep_spacing,
                     savedir=savedir,
                     save_intermediate=save_intermediate,
                     save_format=save_format,
@@ -643,6 +775,7 @@ class ImageGenerator:
                                reverse_steps,
                                sampler,
                                t_start,
+                               timestep_spacing,
                                savedir,
                                save_intermediate,
                                save_format,
@@ -745,9 +878,10 @@ class ImageGenerator:
         
         # Generation loop
         reverse_timeindex, reverse_nextindex = self.diff_util.make_reverse_time_pairs(
-            t_start, reverse_steps
+            t_start, reverse_steps, timestep_spacing
         )
         previous_pred_noise = None
+        sampler_state = self._create_sampler_state(sampler)
         
         logging.debug(f"[IMGEN] Starting reverse diffusion with {len(reverse_timeindex)} steps")
         
@@ -822,6 +956,7 @@ class ImageGenerator:
                     canvas_patch_size=canvas_patch_size,
                     canvas_stride=canvas_stride,
                     use_ema_model=True,
+                    sampler_state=sampler_state,
                 )
 
             if s==0 and inpaint_mask is not None:
