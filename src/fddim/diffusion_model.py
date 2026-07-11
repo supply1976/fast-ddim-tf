@@ -139,8 +139,12 @@ class DiffusionModel(keras.Model):
             raise ValueError("No gradients were produced for the trainable weights")
 
         valid_grads, valid_vars = zip(*grads_and_vars)
-        clipped_grads, _ = tf.clip_by_global_norm(valid_grads, clip_norm=1.0)
-        self.optimizer.apply_gradients(zip(clipped_grads, valid_vars))
+        if isinstance(self.optimizer, keras.mixed_precision.LossScaleOptimizer):
+            # The wrapped optimizer clips after dynamic loss-scale unscaling.
+            grads_to_apply = valid_grads
+        else:
+            grads_to_apply, _ = tf.clip_by_global_norm(valid_grads, clip_norm=1.0)
+        self.optimizer.apply_gradients(zip(grads_to_apply, valid_vars))
         self._update_ema_weights()
 
     def _apply_accumulated_gradients(self):
@@ -155,6 +159,7 @@ class DiffusionModel(keras.Model):
         return tf.constant(0)
 
     def _compute_training_losses(self, images, noises, images_t, t, v_t, y_pred):
+        y_pred = tf.cast(y_pred, images.dtype)
         pred_noise, pred_image = self.diff_util.get_pred_components(
             images_t, t, self.diff_util.pred_type, y_pred, clip_denoise=False,
         )
@@ -200,8 +205,16 @@ class DiffusionModel(keras.Model):
             loss = tf.reduce_mean(loss, axis=[1, 2], keepdims=True)
             weighted_loss = loss * loss_weights
             loss = tf.reduce_mean(weighted_loss)
+            if hasattr(self.optimizer, "scale_loss"):
+                loss_for_gradients = self.optimizer.scale_loss(loss)
+            elif hasattr(self.optimizer, "get_scaled_loss"):
+                loss_for_gradients = self.optimizer.get_scaled_loss(loss)
+            else:
+                loss_for_gradients = loss
 
-        gradients = tape.gradient(loss, self.network.trainable_weights)
+        gradients = tape.gradient(loss_for_gradients, self.network.trainable_weights)
+        if hasattr(self.optimizer, "get_unscaled_gradients"):
+            gradients = self.optimizer.get_unscaled_gradients(gradients)
         if not self._use_grad_accum:
             self._apply_gradients(gradients)
         else:

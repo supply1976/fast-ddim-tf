@@ -619,6 +619,19 @@ class ModelBuilder:
         else:
             raise NotImplementedError(f"Loss function {loss_fn_name} not implemented")
 
+    @staticmethod
+    def create_optimizer(training_config: TrainingConfig):
+        """Create AdamW with global clipping and optional dynamic loss scaling."""
+        lr_schedule = ModelBuilder.create_lr_schedule(training_config)
+        optimizer = keras.optimizers.AdamW(
+            learning_rate=lr_schedule,
+            weight_decay=0.0,
+            global_clipnorm=1.0,
+        )
+        if keras.mixed_precision.global_policy().name == 'mixed_float16':
+            optimizer = keras.mixed_precision.LossScaleOptimizer(optimizer)
+        return optimizer
+
 
 class DirectoryManager:
     """Handles directory creation and logging setup."""
@@ -807,6 +820,9 @@ class LoggingManager:
         logging.info(f"[INFO] Noise Scheduler: {diffusion_scheduler_config.scheduler}")
         logging.info(f"[INFO] Learning Rate Type: {training_config.lr_type}")
         logging.info(f"[INFO] Learning Rate: {training_config.learning_rate}")
+        logging.info(
+            f"[INFO] Compute Policy: {keras.mixed_precision.global_policy().name}"
+        )
         logging.info(f"[INFO] Batch Size: {training_config.batch_size}")
         logging.info(f"[INFO] Gradient Accumulation Steps: {training_config.grad_accum_steps}")
         logging.info(
@@ -943,9 +959,8 @@ class DiffusionTrainer:
         LoggingManager.log_training_info(self.dataset_config, self.training_config, self.diffusion_scheduler_config)
         
         # Setup training components
-        lr_schedule = ModelBuilder.create_lr_schedule(self.training_config)
         loss_fn = ModelBuilder.create_loss_function(self.training_config.loss_fn)
-        optimizer = keras.optimizers.AdamW(learning_rate=lr_schedule, weight_decay=0.0)
+        optimizer = ModelBuilder.create_optimizer(self.training_config)
         
         # Setup callbacks
         callbacks = [
@@ -1161,6 +1176,9 @@ class ImageGenerator:
         logging.info(f"[IMGEN] dynamic_threshold_max: {self.imgen_config.dynamic_threshold_max}")
         logging.info(f"[IMGEN] hostname: {os.uname().nodename}")
         logging.info(f"[IMGEN] TF version: {tf.__version__}")
+        logging.info(
+            f"[IMGEN] Compute policy: {keras.mixed_precision.global_policy().name}"
+        )
     
     def _prepare_generation_inputs(self) -> Tuple[Optional[np.ndarray], Optional[tf.Tensor]]:
         """Prepare base images and labels for generation."""
@@ -1363,6 +1381,12 @@ def emit_config_template(output_path: Optional[str] = None):
     else:
         print(content)
 
+
+def configure_mixed_precision(enabled: bool) -> None:
+    """Select float16 network compute or the default float32 policy."""
+    policy_name = "mixed_float16" if enabled else "float32"
+    keras.mixed_precision.set_global_policy(policy_name)
+
 def main():
     """Main entry point for training or image generation."""
     internal_debug = os.getenv("ENABLE_PLOT_MODEL_GRAPH", "0") == "1"
@@ -1382,6 +1406,12 @@ def main():
     if internal_debug:
         mode_group.add_argument("--plot_model_graph", action='store_true', help=argparse.SUPPRESS)
     parser.add_argument("--enable_xla", action='store_true', help='Enable XLA JIT compilation')
+    parser.add_argument(
+        "--mixed-precision",
+        "--mixed_precision",
+        action="store_true",
+        help="Enable mixed_float16 training or inference (disabled by default)",
+    )
     
     args = parser.parse_args()
     
@@ -1399,6 +1429,8 @@ def main():
 
     if not (args.training or args.imgen or getattr(args, "plot_model_graph", False)):
         parser.error("One mode flag is required: --training or --imgen")
+
+    configure_mixed_precision(args.mixed_precision)
     
     # Execute requested mode
     if args.training:

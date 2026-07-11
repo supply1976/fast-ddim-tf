@@ -333,6 +333,10 @@ class DiffusionUtility:
         Returns:
             tuple: (pred_noise, pred_image)
         """
+        # Keep diffusion and solver arithmetic in float32 even when the network
+        # uses mixed_float16 computation.
+        y_pred = tf.cast(y_pred, x_t.dtype)
+
         # Get coefficients for timestep t
         var_t = tf.gather(self.var_coefs, t)[:, None, None, None]
         sigma_t = tf.gather(self.sigma_coefs, t)[:, None, None, None]
