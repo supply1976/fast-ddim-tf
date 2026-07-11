@@ -10,8 +10,8 @@ DATASET:
         CROP_SIZE: null          # int or null, if set, it applies a crop to the input images (after resizing if IMG_RESIZE is set). If int, it crops a square region of CROP_SIZE x CROP_SIZE. If null, no cropping is applied and the original image size is used for training.
         CROP_TYPE: center        # center | random | corner
         CROP_POSITION: center    # center | top_left | top_right | bottom_left | bottom_right
-        AUGMENT: false
-        AUGMENT_TYPE: null       # fliplr | flipud | rotate | flip-rotate
+        AUGMENT: true
+        AUGMENT_TYPE: fliplr       # fliplr | flipud | rotate | flip-rotate
         CACHE: false
         VALIDATION_SPLIT: null   # float in (0, 1), or null
 
