@@ -979,7 +979,6 @@ class DiffusionTrainer:
                 os.path.join(logging_dir, "loss.csv"),
                 append=True,
                 separator=",",
-                period=self.training_config.save_period,
             ),
             TQDMProgressBar(),
         ])
