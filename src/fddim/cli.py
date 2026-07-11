@@ -213,8 +213,8 @@ class TrainingConfig:
     save_period: int = 10
     batch_size: int = 16
     grad_accum_steps: int = 1 # effective batch size = batch_size * grad_accum_steps
-    steps_per_epoch: Optional[int] = None
     total_global_steps: Optional[int] = None
+    micro_steps_per_epoch: int = 0
     ema: float = 0.999
     lr_type: str = 'constant'  # Options: 'constant', 'warmup_cosine'
     learning_rate: float = 1.0e-4
@@ -235,7 +235,6 @@ class TrainingConfig:
         save_period: int = 10,
         batch_size: int = 16,
         grad_accum_steps: int = 1,
-        steps_per_epoch: Optional[int] = None,
         total_global_steps: Optional[int] = None,
         ema: float = 0.999,
         lr_type: str = 'constant',  # Options: 'constant', 'warmup_cosine'
@@ -255,8 +254,8 @@ class TrainingConfig:
         self.save_period = save_period
         self.batch_size = batch_size
         self.grad_accum_steps = grad_accum_steps
-        self.steps_per_epoch = steps_per_epoch
         self.total_global_steps = total_global_steps
+        self.micro_steps_per_epoch = 0
         self.ema = ema
         self.lr_type = lr_type
         self.learning_rate = learning_rate
@@ -378,7 +377,7 @@ class ConfigManager:
     @staticmethod
     def parse_config(
         config_path: str,
-    ) -> Tuple[DatasetConfig, DiffusionSchedulerConfig, TrainingConfig, NetworkConfig, ImageGenConfig]:
+    ) -> Dict[str, Any]:
         """Parse YAML config file into structured configs."""
         with open(config_path, 'r') as f:
             cfg = yaml.safe_load(f)
@@ -404,6 +403,10 @@ class ConfigManager:
         training_dict = cfg['TRAINING']
         inline_gen = training_dict.get('INLINE_GEN', {})
         hyper_params = training_dict['HYPER_PARAMETERS']
+        if 'STEPS_PER_EPOCH' in hyper_params:
+            raise ValueError(
+                "STEPS_PER_EPOCH is no longer supported; use TOTAL_GLOBAL_STEPS"
+            )
         training_config = TrainingConfig(
             output_dir=training_dict.get('OUTPUT_DIR', './training_outputs'),
             load_pretrained=training_dict.get('LOAD_PRETRAINED', None),
@@ -414,7 +417,6 @@ class ConfigManager:
             save_period=hyper_params.get('SAVE_PERIOD'),
             batch_size=hyper_params['BATCH_SIZE'],
             grad_accum_steps=hyper_params.get('GRAD_ACCUM_STEPS', 1),
-            steps_per_epoch=hyper_params.get('STEPS_PER_EPOCH'),
             total_global_steps=hyper_params.get('TOTAL_GLOBAL_STEPS'),
             ema=hyper_params.get('EMA', 0.999),
             lr_type=hyper_params.get('LR_TYPE', 'constant'),
@@ -427,32 +429,24 @@ class ConfigManager:
         )
         if training_config.grad_accum_steps < 1:
             raise ValueError("GRAD_ACCUM_STEPS must be >= 1")
-        if training_config.total_global_steps is not None:
-            if training_config.total_global_steps < 1:
-                raise ValueError("TOTAL_GLOBAL_STEPS must be >= 1")
-            if training_config.steps_per_epoch is not None:
-                raise ValueError(
-                    "Specify only one of TOTAL_GLOBAL_STEPS or STEPS_PER_EPOCH"
-                )
-            total_micro_steps = (
-                training_config.total_global_steps
-                * training_config.grad_accum_steps
+        if training_config.epochs < 1:
+            raise ValueError("EPOCHS must be >= 1")
+        if training_config.total_global_steps is None:
+            raise ValueError("TOTAL_GLOBAL_STEPS must be provided")
+        if training_config.total_global_steps < 1:
+            raise ValueError("TOTAL_GLOBAL_STEPS must be >= 1")
+
+        total_micro_steps = (
+            training_config.total_global_steps
+            * training_config.grad_accum_steps
+        )
+        if total_micro_steps % training_config.epochs != 0:
+            raise ValueError(
+                "TOTAL_GLOBAL_STEPS * GRAD_ACCUM_STEPS must be divisible by EPOCHS"
             )
-            if total_micro_steps % training_config.epochs != 0:
-                raise ValueError(
-                    "TOTAL_GLOBAL_STEPS * GRAD_ACCUM_STEPS must be divisible by EPOCHS"
-                )
-            training_config.steps_per_epoch = total_micro_steps // training_config.epochs
-        else:
-            if training_config.steps_per_epoch is None:
-                raise ValueError(
-                    "Either TOTAL_GLOBAL_STEPS or STEPS_PER_EPOCH must be provided"
-                )
-            if training_config.steps_per_epoch < 1:
-                raise ValueError("STEPS_PER_EPOCH must be >= 1")
-            training_config.total_global_steps = (
-                training_config.epochs * training_config.steps_per_epoch
-            ) // training_config.grad_accum_steps
+        training_config.micro_steps_per_epoch = (
+            total_micro_steps // training_config.epochs
+        )
         # Parse diffusion scheduler config
         diffusion_scheduler_dict = cfg['DIFFUSION_SCHEDULER']
         diffusion_scheduler_config = DiffusionSchedulerConfig(
@@ -819,18 +813,20 @@ class LoggingManager:
             f"[INFO] Effective Batch Size: "
             f"{training_config.batch_size * training_config.grad_accum_steps}"
         )
-        if training_config.total_global_steps is not None:
-            logging.info(
-                f"[INFO] Total Global Steps (optimizer updates): "
-                f"{training_config.total_global_steps}"
-            )
+        logging.info(
+            f"[INFO] Total Global Steps (optimizer updates): "
+            f"{training_config.total_global_steps}"
+        )
         logging.info(f"[INFO] Predict Type: {diffusion_scheduler_config.pred_type}")
         logging.info(f"[INFO] Loss Function: {training_config.loss_fn}")
         logging.info(f"[INFO] Loss Weight Type: {training_config.loss_weight_type}")
         if training_config.loss_weight_type == 'min_snr':
             logging.info(f"[INFO] Min-SNR Gamma: {training_config.min_snr_gamma}")
         logging.info(f"[INFO] Total Epochs: {training_config.epochs}")
-        logging.info(f"[INFO] Steps per Epoch (micro-batches): {training_config.steps_per_epoch}")
+        logging.info(
+            f"[INFO] Micro-batches per Epoch: "
+            f"{training_config.micro_steps_per_epoch}"
+        )
         logging.info(f"[INFO] EMA Decay Rate: {training_config.ema}")
 
 
@@ -996,7 +992,7 @@ class DiffusionTrainer:
                 self.train_ds,
                 validation_data=self.valid_ds,
                 epochs=self.training_config.epochs,
-                steps_per_epoch=self.training_config.steps_per_epoch,
+                steps_per_epoch=self.training_config.micro_steps_per_epoch,
                 callbacks=callbacks,
                 verbose=0,  # Disable Keras default progress bar
             )
@@ -1289,8 +1285,7 @@ TRAINING:
         SAVE_PERIOD: 10     # save model every SAVE_PERIOD epochs
         BATCH_SIZE: 128      # batch size for training
         GRAD_ACCUM_STEPS: 1 # gradient accumulation steps, effective batch size = BATCH_SIZE * GRAD_ACCUM_STEPS
-        STEPS_PER_EPOCH: null    # set this OR TOTAL_GLOBAL_STEPS
-        TOTAL_GLOBAL_STEPS: 200000 # set this OR STEPS_PER_EPOCH, if not set, total global steps = STEPS_PER_EPOCH * EPOCHS / GRAD_ACCUM_STEPS, it determines the total number of optimizer updates (global steps) for training, used for learning rate scheduling and training progress tracking
+        TOTAL_GLOBAL_STEPS: 200000 # total optimizer updates; must satisfy TOTAL_GLOBAL_STEPS * GRAD_ACCUM_STEPS divisible by EPOCHS
         EMA: 0.9999    # exponential moving average decay rate for model weights
         LR_TYPE: constant   # constant | warmup_cosine | cosine_decay
         LEARNING_RATE: 2.0e-4
