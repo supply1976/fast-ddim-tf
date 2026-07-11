@@ -24,15 +24,14 @@ TRAINING:
     OUTPUT_DIR: ./training_outputs # output directory for training logs and model checkpoints
     LOAD_PRETRAINED: null      # path to .h5, or null
     LOSS_FN: MSE               # MSE | MAE | BCE
-    LOSS_WEIGHT_TYPE: constant #min_snr  # constant | min_snr
+    LOSS_WEIGHT_TYPE: constant  # constant | min_snr
     MIN_SNR_GAMMA: 5.0
     HYPER_PARAMETERS:
         EPOCHS: 100         # total epochs to train
         SAVE_PERIOD: 10     # save model every SAVE_PERIOD epochs
         BATCH_SIZE: 128      # batch size for training
         GRAD_ACCUM_STEPS: 1 # gradient accumulation steps, effective batch size = BATCH_SIZE * GRAD_ACCUM_STEPS
-        STEPS_PER_EPOCH: null    # set this OR TOTAL_GLOBAL_STEPS
-        TOTAL_GLOBAL_STEPS: 200000 # set this OR STEPS_PER_EPOCH, if not set, total global steps = STEPS_PER_EPOCH * EPOCHS / GRAD_ACCUM_STEPS, it determines the total number of optimizer updates (global steps) for training, used for learning rate scheduling and training progress tracking
+        TOTAL_GLOBAL_STEPS: 200000 # total optimizer updates; must satisfy TOTAL_GLOBAL_STEPS * GRAD_ACCUM_STEPS divisible by EPOCHS
         EMA: 0.9999    # exponential moving average decay rate for model weights
         LR_TYPE: constant   # constant | warmup_cosine | cosine_decay
         LEARNING_RATE: 2.0e-4
@@ -70,6 +69,9 @@ IMAGE_GENERATION:
     NUM_GEN_IMAGES: 20
     BATCH_SIZE: null
     REVERSE_STEPS: 100
+    SAMPLER: ddim_1st          # ddim_1st | ddim_2nd | dpmpp_2m
+    TIMESTEP_SPACING: uniform  # uniform | log_snr
+    T_START: null              # optional starting timestep, e.g. 990 for cosine log-SNR sampling
     CANVAS_SHAPE: null         # [H, W] for canvas_gen
     CANVAS_PATCH_SIZE: null
     CANVAS_STRIDE: null
@@ -78,7 +80,10 @@ IMAGE_GENERATION:
     TARGET_IMAGE_SIZE: 32    # int or [H, W]
     _SELF_GUIDE_SCALE: 0.0
     _SDEDIT_STRENGTH: 0.5
-    CLIP_DENOISE: true       # inference only; clip predicted x0 during reverse sampling
+    CLIP_DENOISE: true       # inference only; project predicted x0 during reverse sampling
+    CLIP_DENOISE_MODE: fixed # fixed | dynamic
+    DYNAMIC_THRESHOLD_PERCENTILE: 0.995
+    DYNAMIC_THRESHOLD_MAX: null
     OUTPUT_OPTIONS:
         SAVE_DIR: null
         SAVE_INTERMEDIATE: false
