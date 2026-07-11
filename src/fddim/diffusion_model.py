@@ -130,11 +130,17 @@ class DiffusionModel(keras.Model):
         ]
 
     def _apply_gradients(self, gradients):
-        clipped_grads = [
-            tf.clip_by_norm(g, clip_norm=1.0) if g is not None else None
-            for g in gradients
+        grads_and_vars = [
+            (gradient, variable)
+            for gradient, variable in zip(gradients, self.network.trainable_weights)
+            if gradient is not None
         ]
-        self.optimizer.apply_gradients(zip(clipped_grads, self.network.trainable_weights))
+        if not grads_and_vars:
+            raise ValueError("No gradients were produced for the trainable weights")
+
+        valid_grads, valid_vars = zip(*grads_and_vars)
+        clipped_grads, _ = tf.clip_by_global_norm(valid_grads, clip_norm=1.0)
+        self.optimizer.apply_gradients(zip(clipped_grads, valid_vars))
         self._update_ema_weights()
 
     def _apply_accumulated_gradients(self):
