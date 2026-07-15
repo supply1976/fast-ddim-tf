@@ -128,6 +128,14 @@ class DiffusionSchedulerConfig:
 
 
 @dataclass
+class PatchDiffusionConfig:
+    """Fixed-patch coordinate-conditioned training configuration."""
+
+    enabled: bool = False
+    patch_size: Optional[int] = None
+
+
+@dataclass
 class NetworkConfig:
     """Network architecture configuration."""
     image_size: Optional[Union[int, Tuple[int, int]]] # int or (int, int)
@@ -455,6 +463,21 @@ class ConfigManager:
             pred_type=diffusion_scheduler_dict.get('PRED_TYPE', 'velocity')
         )
 
+        patch_dict = cfg.get('PATCH_DIFFUSION', {})
+        patch_diffusion_config = PatchDiffusionConfig(
+            enabled=patch_dict.get('ENABLED', False),
+            patch_size=patch_dict.get('PATCH_SIZE'),
+        )
+        if patch_diffusion_config.enabled:
+            if (
+                patch_diffusion_config.patch_size is None
+                or not isinstance(patch_diffusion_config.patch_size, int)
+                or patch_diffusion_config.patch_size < 1
+            ):
+                raise ValueError(
+                    "PATCH_DIFFUSION.PATCH_SIZE must be a positive integer when enabled"
+                )
+
         # Parse network config
         network_dict = cfg['NETWORK']
         network_config = NetworkConfig(
@@ -518,6 +541,7 @@ class ConfigManager:
         configs = {}
         configs['DATASET'] = dataset_config
         configs['DIFFUSION_SCHEDULER'] = diffusion_scheduler_config
+        configs['PATCH_DIFFUSION'] = patch_diffusion_config
         configs['TRAINING'] = training_config
         configs['NETWORK'] = network_config
         configs['IMAGE_GENERATION'] = imgen_config
@@ -528,11 +552,19 @@ class ModelBuilder:
     """Handles model construction and related utilities."""
     
     @staticmethod
-    def build_models(network_config: NetworkConfig) -> Tuple[keras.Model, keras.Model]:
+    def build_models(
+        network_config: NetworkConfig,
+        patch_diffusion_config: Optional[PatchDiffusionConfig] = None,
+    ) -> Tuple[keras.Model, keras.Model]:
         """Build main and EMA models."""
         kwargs = dict(
             image_size=network_config.image_size,
             image_channels=network_config.image_channels,
+            coordinate_conditioning=(
+                patch_diffusion_config.enabled
+                if patch_diffusion_config is not None
+                else False
+            ),
             base_channels=network_config.base_channels,
             channel_multiplier=network_config.channel_multiplier,
             has_attention=network_config.has_attention,
@@ -732,15 +764,24 @@ class DatasetManager:
     def prepare_datasets(
         dataset_config: DatasetConfig, 
         training_config: TrainingConfig,
+        patch_diffusion_config: Optional[PatchDiffusionConfig] = None,
     ) -> Tuple[tf.data.Dataset, tf.data.Dataset]:
         """Prepare training and validation datasets with efficient prefetching."""
         autotune = tf.data.AUTOTUNE
         train_ds, valid_ds = None, None
+        patch_enabled = (
+            patch_diffusion_config is not None
+            and patch_diffusion_config.enabled
+        )
         dataloader = DataLoader(
             data_dir=dataset_config.path,
             img_resize=dataset_config.img_resize,
-            crop_size=dataset_config.crop_size,
-            crop_type=dataset_config.crop_type,
+            crop_size=(
+                patch_diffusion_config.patch_size
+                if patch_enabled
+                else dataset_config.crop_size
+            ),
+            crop_type='random' if patch_enabled else dataset_config.crop_type,
             crop_position=dataset_config.crop_position,
             augment=dataset_config.augment,
             augment_type=dataset_config.augment_type,
@@ -748,6 +789,7 @@ class DatasetManager:
             file_format='auto',
             cache=dataset_config.cache,
             validation_split=dataset_config.validation_split,
+            coordinate_conditioning=patch_enabled,
         )
         train_ds, valid_ds = dataloader._get_dataset()
         
@@ -766,7 +808,14 @@ class ReferenceMetricsManager:
 
     @staticmethod
     def _get_images(batch_data):
-        return batch_data[0] if isinstance(batch_data, (list, tuple)) else batch_data
+        features = (
+            batch_data[0]
+            if isinstance(batch_data, (list, tuple))
+            else batch_data
+        )
+        if isinstance(features, dict):
+            return features['image']
+        return features
 
     @classmethod
     def compute_and_save(
@@ -861,19 +910,38 @@ class DiffusionTrainer:
         configs = ConfigManager.parse_config(config_file)
         self.dataset_config = configs['DATASET']
         self.diffusion_scheduler_config = configs['DIFFUSION_SCHEDULER']
+        self.patch_diffusion_config = configs['PATCH_DIFFUSION']
         self.training_config = configs['TRAINING']
         self.network_config = configs['NETWORK']
         self.config_file = config_file
         # Prepare datasets
-        self.train_ds, self.valid_ds = DatasetManager.prepare_datasets(self.dataset_config, self.training_config)
+        self.train_ds, self.valid_ds = DatasetManager.prepare_datasets(
+            self.dataset_config,
+            self.training_config,
+            self.patch_diffusion_config,
+        )
         self.input_shape = None
         # get input shape from one batch
         for batch_data in self.train_ds.take(1):
-            x = batch_data[0] if isinstance(batch_data, (list, tuple)) else batch_data
+            features = (
+                batch_data[0]
+                if isinstance(batch_data, (list, tuple))
+                else batch_data
+            )
+            x = features['image'] if isinstance(features, dict) else features
             _, h, w, c = x.shape
             self.input_shape = (h, w, c)
-        # Build models
-        if h==w:
+        # Build a patch-sized network for Patch Diffusion; ordinary training
+        # continues to use the preprocessed dataset dimensions.
+        if self.patch_diffusion_config.enabled:
+            patch_size = self.patch_diffusion_config.patch_size
+            if h != patch_size or w != patch_size:
+                raise ValueError(
+                    "Patch Diffusion data pipeline returned an unexpected patch "
+                    f"shape ({h}x{w} != {patch_size}x{patch_size})"
+                )
+            self.network_config.image_size = patch_size
+        elif h==w:
             self.network_config.image_size = h
         else:
             self.network_config.image_size = (h, w)
@@ -882,7 +950,9 @@ class DiffusionTrainer:
                 "NETWORK.IMAGE_CHANNELS does not match dataset channels "
                 f"({self.network_config.image_channels} != {self.input_shape[2]})"
             )
-        network, ema_network = ModelBuilder.build_models(self.network_config)
+        network, ema_network = ModelBuilder.build_models(
+            self.network_config, self.patch_diffusion_config
+        )
         self.network = network
         self.ema_network = ema_network
         # Show inputs, outputs and total parameters only, no display of model graph details
@@ -947,6 +1017,8 @@ class DiffusionTrainer:
             loss_weight_type=self.training_config.loss_weight_type,
             min_snr_gamma=self.training_config.min_snr_gamma,
             gradient_accumulation_steps=self.training_config.grad_accum_steps,
+            coordinate_conditioning=self.patch_diffusion_config.enabled,
+            patch_size=self.patch_diffusion_config.patch_size,
         )
         
         # Load existing model if continuing training
@@ -1041,6 +1113,7 @@ class ImageGenerator:
         self.config_dir = os.path.dirname(config_file)
         self.dataset_config = configs['DATASET']
         self.diffusion_scheduler_config = configs['DIFFUSION_SCHEDULER']
+        self.patch_diffusion_config = configs['PATCH_DIFFUSION']
         self.training_config = configs['TRAINING']
         self.network_config = configs['NETWORK']
         self.imgen_config = configs['IMAGE_GENERATION']
@@ -1053,6 +1126,14 @@ class ImageGenerator:
         if not self.imgen_config.model_path or not os.path.isfile(self.imgen_config.model_path):
             raise ValueError(
                 f"IMAGE_GENERATION.MODEL_PATH does not exist: {self.imgen_config.model_path}"
+            )
+        if (
+            self.patch_diffusion_config.enabled
+            and self.imgen_config.target_image_size is None
+        ):
+            raise ValueError(
+                "IMAGE_GENERATION.TARGET_IMAGE_SIZE is required for full-image "
+                "sampling from a Patch Diffusion checkpoint"
             )
         
         # Setup generation directory
@@ -1102,7 +1183,9 @@ class ImageGenerator:
             self.network_config.image_size = (base_images.shape[1], base_images.shape[2])
          
         # Build models
-        _, ema_model = ModelBuilder.build_models(self.network_config)
+        _, ema_model = ModelBuilder.build_models(
+            self.network_config, self.patch_diffusion_config
+        )
         # Load model weights
         ema_model.load_weights(self.imgen_config.model_path)
         # Show inputs, outputs and total parameters only, no display of model graph details
@@ -1117,6 +1200,8 @@ class ImageGenerator:
             ema_network=ema_model,
             diff_util=diff_util_infer,
             num_classes=self.network_config.num_classes,
+            coordinate_conditioning=self.patch_diffusion_config.enabled,
+            patch_size=self.patch_diffusion_config.patch_size,
         )
         
         # Generate images
@@ -1270,7 +1355,7 @@ class ImageGenerator:
 def render_config_template() -> str:
         """Render a complete YAML template with comments for user guidance."""
         return """# Config template
-# Keep top-level sections: DATASET, DIFFUSION_SCHEDULER, TRAINING, NETWORK, IMAGE_GENERATION
+# Keep top-level sections: DATASET, PATCH_DIFFUSION, DIFFUSION_SCHEDULER, TRAINING, NETWORK, IMAGE_GENERATION
 
 DATASET:
     NAME: # your dataset name
@@ -1285,6 +1370,10 @@ DATASET:
         AUGMENT_TYPE: null       # fliplr | flipud | rotate | flip-rotate
         CACHE: false
         VALIDATION_SPLIT: null   # float in (0, 1), or null
+
+PATCH_DIFFUSION:
+    ENABLED: false             # true: train fixed-size random crops with absolute x/y coordinate channels
+    PATCH_SIZE: null           # positive int when enabled; keep DATASET.PREPROCESSING.CROP_SIZE null
 
 DIFFUSION_SCHEDULER:
     SCHEDULER: cosine          # linear | cosine | my_cosine | my_cos6

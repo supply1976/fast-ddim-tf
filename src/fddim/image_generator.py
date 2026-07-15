@@ -9,6 +9,8 @@ import tensorflow as tf
 import tqdm
 from PIL import Image
 
+from .patch_diffusion import append_coordinate_channels, coordinate_grid
+
 
 @dataclass
 class _DPMpp2MState:
@@ -61,12 +63,21 @@ class ImageGenerator:
         "dpm_solver_pp_2m": "dpmpp_2m",
     }
     
-    def __init__(self, diff_util, network, ema_network, timesteps, num_classes=None):
+    def __init__(
+        self,
+        diff_util,
+        network,
+        ema_network,
+        timesteps,
+        num_classes=None,
+        coordinate_conditioning=False,
+    ):
         self.diff_util = diff_util
         self.network = network
         self.ema_network = ema_network
         self.timesteps = timesteps
         self.num_classes = num_classes
+        self.coordinate_conditioning = bool(coordinate_conditioning)
 
     def _normalize_sampler(self, sampler):
         """Return a canonical sampler name while accepting legacy aliases."""
@@ -155,10 +166,31 @@ class ImageGenerator:
         patches = tf.reshape(
             patches, (-1, patch_size, patch_size, channels)
         )
+
+        if self.coordinate_conditioning:
+            canvas_coordinates = coordinate_grid(
+                tf.shape(x_t)[1],
+                tf.shape(x_t)[2],
+                batch_size=batch_size,
+                dtype=x_t.dtype,
+            )
+            coordinate_patches = tf.image.extract_patches(
+                images=canvas_coordinates,
+                sizes=[1, patch_size, patch_size, 1],
+                strides=[1, stride, stride, 1],
+                rates=[1, 1, 1, 1],
+                padding='VALID',
+            )
+            coordinate_patches = tf.reshape(
+                coordinate_patches, (-1, patch_size, patch_size, 2)
+            )
+            network_patches = tf.concat((patches, coordinate_patches), axis=-1)
+        else:
+            network_patches = patches
         
         # Prepare timesteps for all patches
         t_batch = tf.fill((tf.shape(patches)[0],), t)
-        inputs = [patches, t_batch]
+        inputs = [network_patches, t_batch]
         
         # Fix: Properly replicate labels for all patches
         # Each batch element's label should be repeated n_h*n_w times
@@ -265,7 +297,12 @@ class ImageGenerator:
     def _denoise_step(self, x_t, t, clip_denoise, use_ema_model=True, labels=None):
         """Predict noise and x0 at ``t``, thresholding only the x0 estimate."""
         t_batch = tf.fill((tf.shape(x_t)[0],), t)
-        inputs = [x_t, t_batch]
+        network_images = (
+            append_coordinate_channels(x_t)
+            if self.coordinate_conditioning
+            else x_t
+        )
+        inputs = [network_images, t_batch]
         if labels is not None:
             inputs.append(labels)
         y_pred = None
@@ -552,7 +589,13 @@ class ImageGenerator:
         """
         sampler = self._normalize_sampler(sampler)
         # prepare initial samples and labels
-        img_h, img_w, img_c = self.network.inputs[0].shape[1:]
+        img_h, img_w = self.network.inputs[0].shape[1:3]
+        img_c = (
+            self.network.output_shape[-1]
+            if hasattr(self.network, "output_shape")
+            else self.network.inputs[0].shape[-1]
+            - (2 if self.coordinate_conditioning else 0)
+        )
         shape = (num_images, img_h, img_w, img_c)
         samples = tf.random.normal(shape=shape, dtype=tf.float32) 
         labels = self._prepare_labels(num_images, labels)
@@ -799,7 +842,13 @@ class ImageGenerator:
         This is the core generation logic extracted from the original generate_images_and_save
         to enable batch processing for large-scale generation.
         """
-        img_h, img_w, img_c = self.network.inputs[0].shape[1:]
+        img_h, img_w = self.network.inputs[0].shape[1:3]
+        img_c = (
+            self.network.output_shape[-1]
+            if hasattr(self.network, "output_shape")
+            else self.network.inputs[0].shape[-1]
+            - (2 if self.coordinate_conditioning else 0)
+        )
         
         # Handle canvas generation
         if gen_task == 'canvas_gen':

@@ -466,6 +466,8 @@ class InlineEvalCallback(keras.callbacks.Callback):
                 real_images, labels_batch = real_images
             else:
                 labels_batch = None
+            if isinstance(real_images, dict):
+                real_images = real_images['image']
         except StopIteration:
             self.valid_iter = iter(self.valid_ds)
             real_images = next(self.valid_iter)
@@ -473,6 +475,8 @@ class InlineEvalCallback(keras.callbacks.Callback):
                 real_images, labels_batch = real_images
             else:
                 labels_batch = None
+            if isinstance(real_images, dict):
+                real_images = real_images['image']
         real_images = (real_images + 1.0) / 2.0
         fake_images = self.model.sample_images(num_images=self.num_images, labels=labels_batch)
         fid_value = self._calc_fid(real_images[:self.num_images], fake_images[:self.num_images])

@@ -117,6 +117,7 @@ def build_model_from_bkm(name: str) -> keras.Model:
 def build_model(
     image_size=256,
     image_channels=3,
+    coordinate_conditioning=False,
     base_channels=128,
     channel_multiplier=(1, 1, 2, 2, 4, 4),
     has_attention=(False, False, False, False, True, False),
@@ -145,7 +146,11 @@ def build_model(
     image_size : int or tuple[int, int] or None
         Height and width of the input image. If int, assumes square image.
     image_channels : int
-        Number of channels in the input image.
+        Number of denoised image channels. Coordinate-conditioned models
+        accept two additional input channels while retaining this output size.
+    coordinate_conditioning : bool
+        If True, reserve two input channels for normalized absolute ``(x, y)``
+        coordinates as used by Patch Diffusion.
     base_channels : int
         Base number of channels for the first level of the UNet.
     channel_multiplier : list[int | float]
@@ -200,6 +205,8 @@ def build_model(
     # Validate inputs
     if not isinstance(image_channels, int) or image_channels <= 0:
         raise ValueError("`image_channels` must be a positive integer.")
+    if not isinstance(coordinate_conditioning, bool):
+        raise ValueError("`coordinate_conditioning` must be a boolean.")
     if not isinstance(base_channels, int) or base_channels <= 0:
         raise ValueError("`base_channels` must be a positive integer.")
     if not isinstance(channel_multiplier, (list, tuple)) or len(channel_multiplier) == 0:
@@ -248,7 +255,8 @@ def build_model(
     widths = [int(round(base_channels * m)) for m in channel_multiplier]
     if not all(w > 0 for w in widths):
         raise ValueError("Computed stage widths must be positive; check base_channels and channel_multiplier.")
-    input_shape = (image_height, image_width, image_channels)
+    input_channels = image_channels + 2 if coordinate_conditioning else image_channels
+    input_shape = (image_height, image_width, input_channels)
     image_input = keras.Input(shape=input_shape, name="image_input") # tf.Tensor of shape (batch, H, W, C), float32
     time_input = keras.Input(shape=(), name="time_input") # tf.Tensor of shape (batch,), support both int32 (DDPM) and float32 (EDM)
 
@@ -450,4 +458,3 @@ def unit_test_build_bkm_networks():
 
 if __name__ == "__main__":
     unit_test_build_bkm_networks()
-

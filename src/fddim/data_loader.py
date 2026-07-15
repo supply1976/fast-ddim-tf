@@ -6,6 +6,11 @@ import numpy as np
 from functools import partial
 import tensorflow as tf
 
+try:
+    from .patch_diffusion import patch_coordinate_grid
+except ImportError:
+    from patch_diffusion import patch_coordinate_grid
+
 
 class DataLoader:
     def __init__(
@@ -22,6 +27,7 @@ class DataLoader:
         augment_type=None,
         validation_split=None,
         cache=True,
+        coordinate_conditioning=False,
     ):
         """
         Enhanced DataLoader for DDPM v3 with flexible cropping, normalization, and multi-format support.
@@ -36,6 +42,8 @@ class DataLoader:
           - Keep aspect ratio, then center crop to (img_size, img_size, C).
           - Applies optional cropping strategies (center, random, corner).
           - Applies optional augmentation (e.g., flips, 90-degree rotation).
+          - Can emit fixed-size image patches plus absolute coordinate channels
+            for Patch Diffusion before dataset batching.
           - Normalizes images from [0, 1] to [-1, 1].
           - Builds tf.data.Dataset objects for training and validation, with sensible caching,
             shuffling, repeating, and prefetch settings.
@@ -69,6 +77,10 @@ class DataLoader:
                 - 'center_defect': Experimental small zero-mask at image center
             validation_split (float, optional): Fraction of files used for validation. If None, all files are training.
             cache (bool): If True, cache the dataset in memory when deterministic.
+            coordinate_conditioning (bool): If True, ``crop_size`` is required
+                and each element contains separate ``image`` and ``coordinates``
+                tensors. Coordinates describe the crop location on the
+                preprocessed source canvas and are not geometrically augmented.
 
         Notes:
             - Dataset directory must contain only ONE file format (enforced strictly).
@@ -76,6 +88,8 @@ class DataLoader:
             - Resize first if img_resize is provided.
             - Cropping (if enabled) happens before augmentation.
             - Augmentation happens only when is_training=True.
+            - Coordinate tensors are constructed after RGB augmentation and
+              remain in the source canvas orientation.
             - JPEG/PNG images are loaded with TensorFlow's optimized decoders for best performance.
 
         Returns:
@@ -94,7 +108,13 @@ class DataLoader:
         self.label_key = label_key
         self.validation_split = validation_split
         self.cache = cache
+        self.coordinate_conditioning = bool(coordinate_conditioning)
         self.img_shape = None
+
+        if self.coordinate_conditioning and self.crop_size is None:
+            raise ValueError(
+                "crop_size is required when coordinate conditioning is enabled"
+            )
 
         # Validate crop parameters
         valid_crop_types = [None, 'center', 'random', 'corner']
@@ -270,7 +290,7 @@ class DataLoader:
         
         return img_cropped
 
-    def _tf_apply_crop(self, img, is_training=True):
+    def _tf_apply_crop(self, img, is_training=True, return_crop_info=False):
         """
         Apply the configured cropping strategy using TensorFlow operations.
 
@@ -279,9 +299,14 @@ class DataLoader:
             is_training (bool): If True, randomization-enabled strategies may run differently.
 
         Returns:
-            tf.Tensor: Cropped image. If crop_size is None, returns the original image.
+            Cropped image, optionally followed by ``(top, left, full_height,
+            full_width)``. Dimensions refer to the post-resize/post-padding
+            canvas from which the crop was taken.
         """
         if self.crop_size is None:
+            if return_crop_info:
+                shape = tf.shape(img)
+                return img, 0, 0, shape[0], shape[1]
             return img
 
         crop_size = self.crop_size
@@ -292,43 +317,84 @@ class DataLoader:
         def pad_image():
             pad_h = tf.maximum(0, crop_size - h)
             pad_w = tf.maximum(0, crop_size - w)
+            pad_top = pad_h // 2
+            pad_bottom = pad_h - pad_top
+            pad_left = pad_w // 2
+            pad_right = pad_w - pad_left
             paddings = [
-                [pad_h // 2, pad_h - pad_h // 2],
-                [pad_w // 2, pad_w - pad_w // 2],
+                [pad_top, pad_bottom],
+                [pad_left, pad_right],
                 [0, 0]
             ]
-            return tf.pad(img, paddings, mode='REFLECT')
+            can_reflect = tf.reduce_all([
+                pad_top < h,
+                pad_bottom < h,
+                pad_left < w,
+                pad_right < w,
+            ])
+            can_symmetric = tf.reduce_all([
+                pad_top <= h,
+                pad_bottom <= h,
+                pad_left <= w,
+                pad_right <= w,
+            ])
+            return tf.cond(
+                can_reflect,
+                lambda: tf.pad(img, paddings, mode='REFLECT'),
+                lambda: tf.cond(
+                    can_symmetric,
+                    lambda: tf.pad(img, paddings, mode='SYMMETRIC'),
+                    lambda: tf.pad(img, paddings, mode='CONSTANT'),
+                ),
+            )
         
         img = tf.cond(pad_needed, pad_image, lambda: img)
         
-        # Apply crop based on type
+        # Determine an explicit crop origin. tf.image.random_crop does not
+        # expose its sampled offset, which coordinate conditioning requires.
+        shape = tf.shape(img)
+        h, w = shape[0], shape[1]
         if self.crop_type == 'center':
-            return tf.image.resize_with_crop_or_pad(img, crop_size, crop_size)
+            offset_h = (h - crop_size) // 2
+            offset_w = (w - crop_size) // 2
         elif self.crop_type == 'random' and is_training:
-            return tf.image.random_crop(img, size=[crop_size, crop_size, c])
+            offset_h = tf.random.uniform(
+                [], minval=0, maxval=h - crop_size + 1, dtype=tf.int32
+            )
+            offset_w = tf.random.uniform(
+                [], minval=0, maxval=w - crop_size + 1, dtype=tf.int32
+            )
         elif self.crop_type == 'corner':
-            return self._tf_corner_crop(img, crop_size)
+            offset_h, offset_w = self._tf_corner_crop_origin(h, w, crop_size)
         else:
-            # Default to center crop
-            return tf.image.resize_with_crop_or_pad(img, crop_size, crop_size)
+            offset_h = (h - crop_size) // 2
+            offset_w = (w - crop_size) // 2
+
+        cropped = tf.image.crop_to_bounding_box(
+            img, offset_h, offset_w, crop_size, crop_size
+        )
+        if return_crop_info:
+            return cropped, offset_h, offset_w, h, w
+        return cropped
+
+    def _tf_corner_crop_origin(self, h, w, crop_size):
+        """Return the configured corner crop's top-left coordinate."""
+        if self.crop_position == 'top_left':
+            return 0, 0
+        if self.crop_position == 'top_right':
+            return 0, w - crop_size
+        if self.crop_position == 'bottom_left':
+            return h - crop_size, 0
+        if self.crop_position == 'bottom_right':
+            return h - crop_size, w - crop_size
+        return (h - crop_size) // 2, (w - crop_size) // 2
     
     def _tf_corner_crop(self, img, crop_size):
         """Crop [crop_size, crop_size] from a specific corner using TensorFlow."""
         shape = tf.shape(img)
         h, w = shape[0], shape[1]
         
-        if self.crop_position == 'top_left':
-            offset_h, offset_w = 0, 0
-        elif self.crop_position == 'top_right':
-            offset_h, offset_w = 0, w - crop_size
-        elif self.crop_position == 'bottom_left':
-            offset_h, offset_w = h - crop_size, 0
-        elif self.crop_position == 'bottom_right':
-            offset_h, offset_w = h - crop_size, w - crop_size
-        else:
-            # Fallback to center
-            offset_h = (h - crop_size) // 2
-            offset_w = (w - crop_size) // 2
+        offset_h, offset_w = self._tf_corner_crop_origin(h, w, crop_size)
         
         return tf.image.crop_to_bounding_box(img, offset_h, offset_w, crop_size, crop_size)
 
@@ -368,6 +434,55 @@ class DataLoader:
             raise ValueError(f"Unknown augment_type: {self.augment_type}")
 
         return img
+
+    def _tf_preprocess_image(self, img, is_training=True, apply_resize=True):
+        """Resize, crop, augment, normalize, and optionally attach coordinates."""
+        if apply_resize and self.img_resize is not None:
+            img = self._tf_resize_and_center_crop(img)
+
+        crop_info = None
+        if self.crop_size is not None:
+            if self.coordinate_conditioning:
+                img, top, left, full_height, full_width = self._tf_apply_crop(
+                    img, is_training=is_training, return_crop_info=True
+                )
+                crop_info = (top, left, full_height, full_width)
+            else:
+                img = self._tf_apply_crop(img, is_training=is_training)
+
+        # Geometric augmentation changes RGB content placed at each canvas
+        # location. Coordinates remain an untransformed description of that
+        # location, so construct them only after augmenting RGB.
+        if is_training and self.augment:
+            img = self._tf_apply_augmentation(img)
+
+        img = img * 2.0 - 1.0
+        channel_dim = img.shape[-1]
+        if self.crop_size is not None:
+            img = tf.ensure_shape(
+                img, [self.crop_size, self.crop_size, channel_dim]
+            )
+        elif self.img_resize is not None:
+            img = tf.ensure_shape(
+                img, [self.img_resize, self.img_resize, channel_dim]
+            )
+
+        if not self.coordinate_conditioning:
+            return img
+
+        top, left, full_height, full_width = crop_info
+        coordinates = patch_coordinate_grid(
+            full_height,
+            full_width,
+            top,
+            left,
+            self.crop_size,
+            dtype=img.dtype,
+        )
+        coordinates = tf.ensure_shape(
+            coordinates, [self.crop_size, self.crop_size, 2]
+        )
+        return {"image": img, "coordinates": coordinates}
 
     def _tf_load_jpeg(self, path):
         """
@@ -440,27 +555,7 @@ class DataLoader:
             img = self._tf_load_png(path)
         
         if self.data_format in ['jpg', 'png']:
-            # Apply preprocessing with TensorFlow ops for image files
-            if self.img_resize is not None:
-                img = self._tf_resize_and_center_crop(img)
-            
-            if self.crop_size is not None:
-                img = self._tf_apply_crop(img, is_training=is_training)
-            
-            if is_training and self.augment:
-                img = self._tf_apply_augmentation(img)
-            
-            # Normalize from [0, 1] to [-1, 1]
-            img = img * 2.0 - 1.0
-            
-            # Set shape for known dimensions
-            channel_dim = 3 if self.data_format == 'jpg' else None
-            if self.crop_size is not None:
-                img = tf.ensure_shape(img, [self.crop_size, self.crop_size, channel_dim])
-            elif self.img_resize is not None:
-                img = tf.ensure_shape(img, [self.img_resize, self.img_resize, channel_dim])
-            
-            return img
+            return self._tf_preprocess_image(img, is_training=is_training)
         else:
             # Load NPZ file (requires numpy_function for file I/O)
             def _load_npz(path_bytes):
@@ -500,32 +595,18 @@ class DataLoader:
             has_labels = (self.label_key is not None)
             img, label = tf.numpy_function(_load_npz, [path], [tf.float32, tf.int32])
             # numpy_function drops static shape info; restore using shape probed at __init__ time.
-            img.set_shape(self.img_shape)
-            
-            # Apply preprocessing with TensorFlow ops
-            if self.img_resize is not None:
-                img = self._tf_resize_and_center_crop(img)
-            
-            if self.crop_size is not None:
-                img = self._tf_apply_crop(img, is_training=is_training)
-            
-            if is_training and self.augment:
-                img = self._tf_apply_augmentation(img)
-            
-            # Normalize from [0, 1] to [-1, 1]
-            img = img * 2.0 - 1.0
-            
-            # Set shape
-            if self.crop_size is not None:
-                img = tf.ensure_shape(img, [self.crop_size, self.crop_size, None])
-            elif self.img_resize is not None:
-                img = tf.ensure_shape(img, [self.img_resize, self.img_resize, None])
+            if self.coordinate_conditioning:
+                img.set_shape([None, None, self.img_shape[-1]])
+            else:
+                img.set_shape(self.img_shape)
+
+            features = self._tf_preprocess_image(img, is_training=is_training)
             
             if has_labels:
                 label = tf.ensure_shape(label, [])
-                return img, label
+                return features, label
             else:
-                return img
+                return features
 
     def _get_dataset(self):
         """
@@ -570,11 +651,17 @@ class DataLoader:
                         return arr
                     if has_labels:
                         img, label = tf.numpy_function(_load_npz, [path], [tf.float32, tf.int32])
-                        img.set_shape(self.img_shape)
+                        if self.coordinate_conditioning:
+                            img.set_shape([None, None, self.img_shape[-1]])
+                        else:
+                            img.set_shape(self.img_shape)
                         label = tf.ensure_shape(label, [])
                         return img, label
                     img = tf.numpy_function(_load_npz, [path], tf.float32)
-                    img.set_shape(self.img_shape)
+                    if self.coordinate_conditioning:
+                        img.set_shape([None, None, self.img_shape[-1]])
+                    else:
+                        img.set_shape(self.img_shape)
 
                 if self.img_resize is not None:
                     img = self._tf_resize_and_center_crop(img)
@@ -588,17 +675,13 @@ class DataLoader:
                 if not has_labels:
                     label = None
 
-                img = self._tf_apply_crop(img, is_training=True)
-                if self.augment:
-                    img = self._tf_apply_augmentation(img)
-                img = img * 2.0 - 1.0
-
-                channel_dim = 3 if self.data_format == 'jpg' else None
-                img = tf.ensure_shape(img, [self.crop_size, self.crop_size, channel_dim])
+                features = self._tf_preprocess_image(
+                    img, is_training=True, apply_resize=False
+                )
 
                 if has_labels:
-                    return img, label
-                return img
+                    return features, label
+                return features
 
             train_ds = (
                 self.train_ds
@@ -673,6 +756,7 @@ class DataLoader:
             'augment': self.augment,
             'img_resize': self.img_resize,
             'cache': self.cache,
+            'coordinate_conditioning': self.coordinate_conditioning,
         }
 
 

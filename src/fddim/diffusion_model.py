@@ -36,9 +36,13 @@ class DiffusionModel(keras.Model):
         loss_weight_type: Loss weighting strategy - 'constant' or 'min_snr'
         min_snr_gamma: Gamma parameter for min-SNR weighting (default 5.0)
         gradient_accumulation_steps: Number of steps to accumulate gradients before applying an update
+        coordinate_conditioning: Enable Patch Diffusion coordinate channels.
+        patch_size: Expected fixed patch size produced by the DataLoader when
+            coordinate conditioning is enabled.
     """
     def __init__(self, network, ema_network, diff_util, num_classes, save_period=100, ema=0.995,
-                 loss_weight_type='constant', min_snr_gamma=5.0, gradient_accumulation_steps=1):
+                 loss_weight_type='constant', min_snr_gamma=5.0, gradient_accumulation_steps=1,
+                 coordinate_conditioning=False, patch_size=None):
         super().__init__()
         self.network = network
         self.ema_network = ema_network
@@ -51,6 +55,14 @@ class DiffusionModel(keras.Model):
         self.loss_weight_type = loss_weight_type
         self.min_snr_gamma = min_snr_gamma
         self.gradient_accumulation_steps = int(gradient_accumulation_steps)
+        self.coordinate_conditioning = bool(coordinate_conditioning)
+        self.patch_size = patch_size
+        if self.coordinate_conditioning:
+            if self.patch_size is None or int(self.patch_size) < 1:
+                raise ValueError(
+                    "patch_size must be a positive integer when coordinate conditioning is enabled"
+                )
+            self.patch_size = int(self.patch_size)
         if self.gradient_accumulation_steps < 1:
             raise ValueError("gradient_accumulation_steps must be >= 1")
         self.loss_tracker = keras.metrics.Mean(name='loss')
@@ -74,7 +86,36 @@ class DiffusionModel(keras.Model):
                 for weight in self.network.trainable_weights
             ]
         # Initialize generation components
-        self.image_generator = ImageGenerator(diff_util, network, ema_network, self.timesteps, num_classes)
+        self.image_generator = ImageGenerator(
+            diff_util,
+            network,
+            ema_network,
+            self.timesteps,
+            num_classes,
+            coordinate_conditioning=self.coordinate_conditioning,
+        )
+
+    def _unpack_model_data(self, data):
+        """Extract image patches, coordinate conditions, and optional labels."""
+        if isinstance(data, (list, tuple)):
+            features, labels = data
+        else:
+            features, labels = data, None
+
+        if isinstance(features, dict):
+            if 'image' not in features:
+                raise ValueError("Feature dictionary must contain an 'image' tensor")
+            images = features['image']
+            coordinates = features.get('coordinates')
+        else:
+            images = features
+            coordinates = None
+
+        if self.coordinate_conditioning and coordinates is None:
+            raise ValueError(
+                "Coordinate-conditioned training requires DataLoader coordinates"
+            )
+        return images, coordinates, labels
 
     def _precompute_snr_values(self):
         """Precompute SNR values for all timesteps.
@@ -177,17 +218,19 @@ class DiffusionModel(keras.Model):
 
     @tf.function
     def train_step(self, data):
-        if isinstance(data, (list, tuple)):
-            images, labels = data
-        else:
-            images, labels = data, None
+        images, coordinates, labels = self._unpack_model_data(data)
         batch_size = tf.shape(images)[0]
         t = tf.random.uniform(
             minval=1, maxval=self.timesteps + 1, shape=(batch_size,), dtype=tf.int32)
         with tf.GradientTape() as tape:
             noises = tf.random.normal(shape=tf.shape(images), dtype=images.dtype)
             images_t, v_t = self.diff_util.q_sample(images, t, noises)
-            inputs = [images_t, t]
+            network_images = (
+                tf.concat((images_t, coordinates), axis=-1)
+                if coordinates is not None
+                else images_t
+            )
+            inputs = [network_images, t]
             if labels is not None:
                 # randomly null the label with a small probability (Classifier-free guide)
                 null_mask = tf.random.uniform([]) <= 0.1
@@ -245,15 +288,17 @@ class DiffusionModel(keras.Model):
 
     @tf.function
     def test_step(self, data):
-        if isinstance(data, (list, tuple)):
-            images, labels = data
-        else:
-            images, labels = data, None
+        images, coordinates, labels = self._unpack_model_data(data)
         batch_size = tf.shape(images)[0]
         t = tf.random.uniform(minval=1, maxval=self.timesteps + 1, shape=(batch_size,), dtype=tf.int32)
         noises = tf.random.normal(shape=tf.shape(images), dtype=images.dtype)
         images_t, v_t = self.diff_util.q_sample(images, t, noises)
-        inputs = [images_t, t]
+        network_images = (
+            tf.concat((images_t, coordinates), axis=-1)
+            if coordinates is not None
+            else images_t
+        )
+        inputs = [network_images, t]
         if labels is not None:
             inputs.append(labels)
         y_pred = self.ema_network(inputs, training=False)
