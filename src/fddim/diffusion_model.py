@@ -3,6 +3,7 @@ import numpy as np
 import tensorflow as tf
 from tensorflow import keras # type: ignore
 from .image_generator import ImageGenerator
+from .patch_diffusion import normalize_spatial_size
 
 
 class DiffusionModel(keras.Model):
@@ -56,13 +57,14 @@ class DiffusionModel(keras.Model):
         self.min_snr_gamma = min_snr_gamma
         self.gradient_accumulation_steps = int(gradient_accumulation_steps)
         self.coordinate_conditioning = bool(coordinate_conditioning)
-        self.patch_size = patch_size
+        self.patch_size = normalize_spatial_size(
+            patch_size, name="patch_size", allow_none=True
+        )
         if self.coordinate_conditioning:
-            if self.patch_size is None or int(self.patch_size) < 1:
+            if self.patch_size is None:
                 raise ValueError(
-                    "patch_size must be a positive integer when coordinate conditioning is enabled"
+                    "patch_size must be provided when coordinate conditioning is enabled"
                 )
-            self.patch_size = int(self.patch_size)
         if self.gradient_accumulation_steps < 1:
             raise ValueError("gradient_accumulation_steps must be >= 1")
         self.loss_tracker = keras.metrics.Mean(name='loss')

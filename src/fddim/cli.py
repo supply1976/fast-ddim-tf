@@ -30,6 +30,7 @@ from .diffusion_model import DiffusionModel
 from .unet2d import build_model
 from .diffusion_utils import DiffusionUtility
 from .data_loader import DataLoader
+from .patch_diffusion import normalize_spatial_size
 from .callbacks import (
     WarmUpCosine,
     TQDMProgressBar,
@@ -66,7 +67,7 @@ class DatasetConfig:
     path: str
     label_key: Optional[str] = None
     img_resize: Optional[int] = None
-    crop_size: Optional[int] = None
+    crop_size: Optional[Tuple[int, int]] = None
     crop_type: str = 'center'
     crop_position: str = 'center'
     augment: bool = False
@@ -80,7 +81,7 @@ class DatasetConfig:
         path: str,
         label_key: Optional[str] = None,
         img_resize: Optional[int] = None,
-        crop_size: Optional[int] = None,
+        crop_size: Optional[Union[int, Tuple[int, int]]] = None,
         crop_type: str = 'center',
         crop_position: str = 'center',
         augment: bool = False,
@@ -92,7 +93,9 @@ class DatasetConfig:
         self.path = path
         self.label_key = label_key
         self.img_resize = img_resize
-        self.crop_size = crop_size
+        self.crop_size = normalize_spatial_size(
+            crop_size, name="DATASET.PREPROCESSING.CROP_SIZE", allow_none=True
+        )
         self.crop_type = crop_type
         self.crop_position = crop_position
         self.augment = augment
@@ -132,7 +135,12 @@ class PatchDiffusionConfig:
     """Fixed-patch coordinate-conditioned training configuration."""
 
     enabled: bool = False
-    patch_size: Optional[int] = None
+    patch_size: Optional[Tuple[int, int]] = None
+
+    def __post_init__(self):
+        self.patch_size = normalize_spatial_size(
+            self.patch_size, name="PATCH_DIFFUSION.PATCH_SIZE", allow_none=True
+        )
 
 
 @dataclass
@@ -466,16 +474,16 @@ class ConfigManager:
         patch_dict = cfg.get('PATCH_DIFFUSION', {})
         patch_diffusion_config = PatchDiffusionConfig(
             enabled=patch_dict.get('ENABLED', False),
-            patch_size=patch_dict.get('PATCH_SIZE'),
+            patch_size=normalize_spatial_size(
+                patch_dict.get('PATCH_SIZE'),
+                name="PATCH_DIFFUSION.PATCH_SIZE",
+                allow_none=True,
+            ),
         )
         if patch_diffusion_config.enabled:
-            if (
-                patch_diffusion_config.patch_size is None
-                or not isinstance(patch_diffusion_config.patch_size, int)
-                or patch_diffusion_config.patch_size < 1
-            ):
+            if patch_diffusion_config.patch_size is None:
                 raise ValueError(
-                    "PATCH_DIFFUSION.PATCH_SIZE must be a positive integer when enabled"
+                    "PATCH_DIFFUSION.PATCH_SIZE must be provided when enabled"
                 )
 
         # Parse network config
@@ -934,13 +942,13 @@ class DiffusionTrainer:
         # Build a patch-sized network for Patch Diffusion; ordinary training
         # continues to use the preprocessed dataset dimensions.
         if self.patch_diffusion_config.enabled:
-            patch_size = self.patch_diffusion_config.patch_size
-            if h != patch_size or w != patch_size:
+            patch_height, patch_width = self.patch_diffusion_config.patch_size
+            if h != patch_height or w != patch_width:
                 raise ValueError(
                     "Patch Diffusion data pipeline returned an unexpected patch "
-                    f"shape ({h}x{w} != {patch_size}x{patch_size})"
+                    f"shape ({h}x{w} != {patch_height}x{patch_width})"
                 )
-            self.network_config.image_size = patch_size
+            self.network_config.image_size = (patch_height, patch_width)
         elif h==w:
             self.network_config.image_size = h
         else:
@@ -1363,7 +1371,7 @@ DATASET:
     LABEL_KEY: null # optional, specify the key for labels in .npz files if applicable, default is 'label', useful for class-conditional training
     PREPROCESSING:
         IMG_RESIZE: null         # int or null, if set, it applies a resize to the input images before cropping. The resizing is isotropic, i.e., it resizes the shorter edge to IMG_RESIZE while keeping the aspect ratio. If null, no resizing is applied.
-        CROP_SIZE: null          # int or null, if set, it applies a crop to the input images (after resizing if IMG_RESIZE is set). If int, it crops a square region of CROP_SIZE x CROP_SIZE. If null, no cropping is applied and the original image size is used for training.
+        CROP_SIZE: null          # int, [H, W], or null; crop after optional resize
         CROP_TYPE: center        # center | random | corner
         CROP_POSITION: center    # center | top_left | top_right | bottom_left | bottom_right
         AUGMENT: false
@@ -1373,7 +1381,7 @@ DATASET:
 
 PATCH_DIFFUSION:
     ENABLED: false             # true: train fixed-size random crops with absolute x/y coordinate channels
-    PATCH_SIZE: null           # positive int when enabled; keep DATASET.PREPROCESSING.CROP_SIZE null
+    PATCH_SIZE: null           # positive int or [H, W] when enabled; keep DATASET.PREPROCESSING.CROP_SIZE null
 
 DIFFUSION_SCHEDULER:
     SCHEDULER: cosine          # linear | cosine | my_cosine | my_cos6

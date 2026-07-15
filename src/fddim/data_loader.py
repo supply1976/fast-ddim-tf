@@ -7,9 +7,9 @@ from functools import partial
 import tensorflow as tf
 
 try:
-    from .patch_diffusion import patch_coordinate_grid
+    from .patch_diffusion import normalize_spatial_size, patch_coordinate_grid
 except ImportError:
-    from patch_diffusion import patch_coordinate_grid
+    from patch_diffusion import normalize_spatial_size, patch_coordinate_grid
 
 
 class DataLoader:
@@ -54,7 +54,9 @@ class DataLoader:
                 - if None, use original image size.
                 - if provided, resize input array first to have smaller dimension equal to img_resize,
                   keep aspect ratio, then center crop to (img_resize, img_resize).
-            crop_size (int, optional): Size used during cropping. If None, cropping is skipped.
+            crop_size (int or tuple[int, int], optional): Crop height and
+                width. An integer requests a square crop. If None, cropping is
+                skipped.
             crop_type (str): Cropping strategy, one of:
                 - 'center': Center crop (deterministic)
                 - 'random': Random crop (per-example randomness when is_training=True)
@@ -98,7 +100,9 @@ class DataLoader:
         self.CLIP_MAX = 1.0
         self.CLIP_MIN = -1.0
         self.img_resize = img_resize
-        self.crop_size = crop_size
+        self.crop_size = normalize_spatial_size(
+            crop_size, name="crop_size", allow_none=True
+        )
         self.crop_type = crop_type
         self.crop_position = crop_position
         self.augment = augment
@@ -309,14 +313,14 @@ class DataLoader:
                 return img, 0, 0, shape[0], shape[1]
             return img
 
-        crop_size = self.crop_size
+        crop_height, crop_width = self.crop_size
         h, w, c = tf.shape(img)[0], tf.shape(img)[1], tf.shape(img)[2]
-        # Pad if crop_size exceeds current dimensions
-        pad_needed = tf.reduce_any([crop_size > h, crop_size > w])
+        # Pad if the requested crop exceeds current dimensions.
+        pad_needed = tf.reduce_any([crop_height > h, crop_width > w])
         
         def pad_image():
-            pad_h = tf.maximum(0, crop_size - h)
-            pad_w = tf.maximum(0, crop_size - w)
+            pad_h = tf.maximum(0, crop_height - h)
+            pad_w = tf.maximum(0, crop_width - w)
             pad_top = pad_h // 2
             pad_bottom = pad_h - pad_top
             pad_left = pad_w // 2
@@ -355,48 +359,54 @@ class DataLoader:
         shape = tf.shape(img)
         h, w = shape[0], shape[1]
         if self.crop_type == 'center':
-            offset_h = (h - crop_size) // 2
-            offset_w = (w - crop_size) // 2
+            offset_h = (h - crop_height) // 2
+            offset_w = (w - crop_width) // 2
         elif self.crop_type == 'random' and is_training:
             offset_h = tf.random.uniform(
-                [], minval=0, maxval=h - crop_size + 1, dtype=tf.int32
+                [], minval=0, maxval=h - crop_height + 1, dtype=tf.int32
             )
             offset_w = tf.random.uniform(
-                [], minval=0, maxval=w - crop_size + 1, dtype=tf.int32
+                [], minval=0, maxval=w - crop_width + 1, dtype=tf.int32
             )
         elif self.crop_type == 'corner':
-            offset_h, offset_w = self._tf_corner_crop_origin(h, w, crop_size)
+            offset_h, offset_w = self._tf_corner_crop_origin(
+                h, w, crop_height, crop_width
+            )
         else:
-            offset_h = (h - crop_size) // 2
-            offset_w = (w - crop_size) // 2
+            offset_h = (h - crop_height) // 2
+            offset_w = (w - crop_width) // 2
 
         cropped = tf.image.crop_to_bounding_box(
-            img, offset_h, offset_w, crop_size, crop_size
+            img, offset_h, offset_w, crop_height, crop_width
         )
         if return_crop_info:
             return cropped, offset_h, offset_w, h, w
         return cropped
 
-    def _tf_corner_crop_origin(self, h, w, crop_size):
+    def _tf_corner_crop_origin(self, h, w, crop_height, crop_width):
         """Return the configured corner crop's top-left coordinate."""
         if self.crop_position == 'top_left':
             return 0, 0
         if self.crop_position == 'top_right':
-            return 0, w - crop_size
+            return 0, w - crop_width
         if self.crop_position == 'bottom_left':
-            return h - crop_size, 0
+            return h - crop_height, 0
         if self.crop_position == 'bottom_right':
-            return h - crop_size, w - crop_size
-        return (h - crop_size) // 2, (w - crop_size) // 2
+            return h - crop_height, w - crop_width
+        return (h - crop_height) // 2, (w - crop_width) // 2
     
     def _tf_corner_crop(self, img, crop_size):
-        """Crop [crop_size, crop_size] from a specific corner using TensorFlow."""
+        """Crop ``crop_size`` from a specific corner using TensorFlow."""
         shape = tf.shape(img)
         h, w = shape[0], shape[1]
+        crop_height, crop_width = normalize_spatial_size(crop_size, "crop_size")
+        offset_h, offset_w = self._tf_corner_crop_origin(
+            h, w, crop_height, crop_width
+        )
         
-        offset_h, offset_w = self._tf_corner_crop_origin(h, w, crop_size)
-        
-        return tf.image.crop_to_bounding_box(img, offset_h, offset_w, crop_size, crop_size)
+        return tf.image.crop_to_bounding_box(
+            img, offset_h, offset_w, crop_height, crop_width
+        )
 
     def _tf_apply_augmentation(self, img):
         """
@@ -422,13 +432,20 @@ class DataLoader:
         elif self.augment_type == 'flipud':
             img = tf.image.random_flip_up_down(img)
         elif self.augment_type == 'rotate':
-            # Random 90-degree rotation
-            k = tf.random.uniform([], minval=0, maxval=4, dtype=tf.int32)
+            # Odd quarter-turns swap height/width, so rectangular crops use
+            # shape-preserving 0/180-degree rotations.
+            max_k = 4 if self.crop_size is None or self.crop_size[0] == self.crop_size[1] else 2
+            k = tf.random.uniform([], minval=0, maxval=max_k, dtype=tf.int32)
+            if max_k == 2:
+                k *= 2
             img = tf.image.rot90(img, k=k)
         elif self.augment_type == 'flip-rotate':
             # Combined flip and rotate
             img = tf.image.random_flip_left_right(img)
-            k = tf.random.uniform([], minval=0, maxval=4, dtype=tf.int32)
+            max_k = 4 if self.crop_size is None or self.crop_size[0] == self.crop_size[1] else 2
+            k = tf.random.uniform([], minval=0, maxval=max_k, dtype=tf.int32)
+            if max_k == 2:
+                k *= 2
             img = tf.image.rot90(img, k=k)
         else:
             raise ValueError(f"Unknown augment_type: {self.augment_type}")
@@ -459,8 +476,9 @@ class DataLoader:
         img = img * 2.0 - 1.0
         channel_dim = img.shape[-1]
         if self.crop_size is not None:
+            crop_height, crop_width = self.crop_size
             img = tf.ensure_shape(
-                img, [self.crop_size, self.crop_size, channel_dim]
+                img, [crop_height, crop_width, channel_dim]
             )
         elif self.img_resize is not None:
             img = tf.ensure_shape(
@@ -480,7 +498,7 @@ class DataLoader:
             dtype=img.dtype,
         )
         coordinates = tf.ensure_shape(
-            coordinates, [self.crop_size, self.crop_size, 2]
+            coordinates, [self.crop_size[0], self.crop_size[1], 2]
         )
         return {"image": img, "coordinates": coordinates}
 
