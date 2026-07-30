@@ -137,6 +137,14 @@ class PatchDiffusionConfig:
     enabled: bool = False
     patch_size: Optional[Tuple[int, int]] = None
 
+    def __init__(
+        self,
+        enabled: bool = False,
+        patch_size: Optional[Union[int, Tuple[int, int]]] = None,
+    ):
+        self.enabled = enabled
+        self.patch_size = patch_size
+
     def __post_init__(self):
         self.patch_size = normalize_spatial_size(
             self.patch_size, name="PATCH_DIFFUSION.PATCH_SIZE", allow_none=True
